@@ -9,6 +9,10 @@ export function errorHandler(
   _next: NextFunction
 ): void {
   if (err instanceof AppError) {
+    const details = err.details as Record<string, any> | undefined;
+    if (err.statusCode === 429 && details?.retryAfter) {
+      res.setHeader('Retry-After', String(details.retryAfter));
+    }
     sendError(res, err.statusCode, err.code, err.message, err.details);
     return;
   }

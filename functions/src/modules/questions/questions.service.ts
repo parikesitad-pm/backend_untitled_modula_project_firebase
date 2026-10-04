@@ -1,6 +1,8 @@
 import { db } from '../../config/firebase';
-import { NotFoundError } from '../../lib/errors';
+import { NotFoundError, ConflictError } from '../../lib/errors';
 import { CreateQuestionInput, UpdateQuestionInput, ReorderQuestionsInput, ChoiceInput } from './questions.schema';
+import { storageService } from '../storage/storage.service';
+import { getClock } from '../../lib/clock';
 
 export interface ChoiceDocument {
   id: string;
@@ -22,6 +24,7 @@ export interface QuestionWithChoices {
   speedBonusPercent: number;
   timeReferenceSeconds: number;
   imagePath?: string | null;
+  imageUrl?: string | null;
   createdAt: string;
   updatedAt: string;
   choices: ChoiceDocument[];
@@ -30,6 +33,7 @@ export interface QuestionWithChoices {
 export class QuestionsService {
   private questionsCol = db.collection('questions');
   private choicesCol = db.collection('choices');
+  private attemptsCol = db.collection('attempts');
 
   private async saveChoices(questionId: string, choices: ChoiceInput[]): Promise<ChoiceDocument[]> {
     const batch = db.batch();
@@ -55,7 +59,7 @@ export class QuestionsService {
   async create(activityId: string, input: CreateQuestionInput): Promise<QuestionWithChoices> {
     const countSnap = await this.questionsCol.where('activityId', '==', activityId).get();
     const nextPosition = input.position ?? countSnap.size;
-    const now = new Date().toISOString();
+    const now = getClock().nowIso();
     const qRef = this.questionsCol.doc();
 
     const qDoc = {
@@ -76,7 +80,6 @@ export class QuestionsService {
 
     await qRef.set(qDoc);
     const savedChoices = await this.saveChoices(qRef.id, input.choices);
-
     return { ...qDoc, choices: savedChoices };
   }
 
@@ -91,11 +94,13 @@ export class QuestionsService {
       const choices = cSnap.docs.map((d) => d.data() as ChoiceDocument);
       choices.sort((a, b) => a.position - b.position);
 
-      const sanitizedChoices = isPublic
-        ? choices.map(({ isCorrect, ...rest }) => rest)
-        : choices;
+      const sanitizedChoices = isPublic ? choices.map(({ isCorrect, ...rest }) => rest) : choices;
+      let imageUrl: string | null = null;
+      if (q.imagePath) {
+        imageUrl = await storageService.getSignedReadUrl(q.imagePath);
+      }
 
-      results.push({ ...q, choices: sanitizedChoices });
+      results.push({ ...q, imageUrl, choices: sanitizedChoices });
     }
 
     return results;
@@ -103,26 +108,47 @@ export class QuestionsService {
 
   async getById(id: string, isPublic = false): Promise<QuestionWithChoices> {
     const doc = await this.questionsCol.doc(id).get();
-    if (!doc.exists) {
-      throw new NotFoundError(`Question with id '${id}' not found`);
-    }
+    if (!doc.exists) throw new NotFoundError(`Question with id '${id}' not found`);
     const q = doc.data() as any;
+
     const cSnap = await this.choicesCol.where('questionId', '==', id).get();
     const choices = cSnap.docs.map((d) => d.data() as ChoiceDocument);
     choices.sort((a, b) => a.position - b.position);
 
-    const sanitizedChoices = isPublic
-      ? choices.map(({ isCorrect, ...rest }) => rest)
-      : choices;
+    const sanitizedChoices = isPublic ? choices.map(({ isCorrect, ...rest }) => rest) : choices;
+    let imageUrl: string | null = null;
+    if (q.imagePath) {
+      imageUrl = await storageService.getSignedReadUrl(q.imagePath);
+    }
 
-    return { ...q, choices: sanitizedChoices };
+    return { ...q, imageUrl, choices: sanitizedChoices };
+  }
+
+  private async assertCanModifyQuestion(activityId: string, input: UpdateQuestionInput): Promise<void> {
+    const attemptsSnap = await this.attemptsCol.where('activityId', '==', activityId).limit(1).get();
+    if (attemptsSnap.empty) return;
+
+    const isScoringFieldPresent =
+      input.weight !== undefined ||
+      input.choices !== undefined ||
+      input.speedBonusEnabled !== undefined ||
+      input.speedBonusPercent !== undefined ||
+      input.timeReferenceSeconds !== undefined;
+
+    if (isScoringFieldPresent) {
+      throw new ConflictError(
+        'Question scoring-affecting fields are locked because attempts exist for this activity',
+        'QUESTION_LOCKED'
+      );
+    }
   }
 
   async update(id: string, input: UpdateQuestionInput): Promise<QuestionWithChoices> {
-    await this.getById(id);
-    const now = new Date().toISOString();
-    const { choices, ...qData } = input;
+    const current = await this.getById(id);
+    await this.assertCanModifyQuestion(current.activityId, input);
 
+    const now = getClock().nowIso();
+    const { choices, ...qData } = input;
     await this.questionsCol.doc(id).update({ ...qData, updatedAt: now });
 
     if (choices && choices.length > 0) {
@@ -137,7 +163,12 @@ export class QuestionsService {
   }
 
   async delete(id: string): Promise<void> {
-    await this.getById(id);
+    const current = await this.getById(id);
+    const attemptsSnap = await this.attemptsCol.where('activityId', '==', current.activityId).limit(1).get();
+    if (!attemptsSnap.empty) {
+      throw new ConflictError('Cannot delete question because attempts exist for this activity', 'QUESTION_LOCKED');
+    }
+
     const choicesSnap = await this.choicesCol.where('questionId', '==', id).get();
     const batch = db.batch();
     choicesSnap.docs.forEach((d) => batch.delete(d.ref));
@@ -147,9 +178,10 @@ export class QuestionsService {
 
   async reorder(input: ReorderQuestionsInput): Promise<void> {
     const batch = db.batch();
+    const now = getClock().nowIso();
     input.items.forEach((item) => {
       const ref = this.questionsCol.doc(item.id);
-      batch.update(ref, { position: item.position, updatedAt: new Date().toISOString() });
+      batch.update(ref, { position: item.position, updatedAt: now });
     });
     await batch.commit();
   }

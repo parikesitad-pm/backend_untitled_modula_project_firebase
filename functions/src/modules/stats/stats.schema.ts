@@ -33,19 +33,36 @@ export const QuestionStatSchema = z.object({
 
 export type QuestionStat = z.infer<typeof QuestionStatSchema>;
 
+export const PrePostParticipantComparisonSchema = z.object({
+  participantCode: z.string(),
+  name: z.string(),
+  preScore: z.number().nullable(),
+  postScore: z.number().nullable(),
+  scoreDelta: z.number().nullable(),
+  delta: z.number().nullable(),
+  matched: z.boolean(),
+});
+
+export type PrePostParticipantComparison = z.infer<typeof PrePostParticipantComparisonSchema>;
+
 export const PrePostComparisonSchema = z.object({
   groupId: z.string(),
   preActivity: z.object({ id: z.string(), title: z.string(), averageScore: z.number() }).nullable(),
   postActivity: z.object({ id: z.string(), title: z.string(), averageScore: z.number() }).nullable(),
   scoreDelta: z.number(),
-  pairedParticipantsCount: z.number().int().min(0),
-  pairedAverageDelta: z.number(),
-  questionStatsDelta: z.array(z.object({
-    questionIndex: z.number().int().min(0),
-    preCorrectPercentage: z.number(),
-    postCorrectPercentage: z.number(),
-    delta: z.number(),
-  })),
+  matchedCount: z.number().int().min(0),
+  unmatchedCount: z.number().int().min(0),
+  totalParticipants: z.number().int().min(0),
+  matchedAverageDelta: z.number(),
+  participants: z.array(PrePostParticipantComparisonSchema),
+  questionStatsDelta: z.array(
+    z.object({
+      questionIndex: z.number().int().min(0),
+      preCorrectPercentage: z.number(),
+      postCorrectPercentage: z.number(),
+      delta: z.number(),
+    })
+  ),
 });
 
 export type PrePostComparison = z.infer<typeof PrePostComparisonSchema>;

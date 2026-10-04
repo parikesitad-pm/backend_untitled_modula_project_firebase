@@ -14,8 +14,7 @@ service firebase.storage {
 
     // Question assets
     match /activities/{activityId}/questions/{allPaths=**} {
-      // Public can read question images, operators can upload valid images
-      allow read: if true;
+      allow read: if isOperator();
       allow write: if isOperator() && isValidImage();
     }
 

@@ -13,6 +13,8 @@ export const ParticipantFieldDefSchema = z.object({
 
 export const ActivitySettingsSchema = z.object({
   timeLimitSeconds: z.number().int().positive().optional(),
+  maxAttempts: z.number().int().positive().optional(),
+  finishGraceSeconds: z.number().int().nonnegative().optional().default(120),
   shuffleQuestions: z.boolean().default(false),
   allowMultipleAttempts: z.boolean().default(false),
   speedBonusCapPercent: z.number().min(0).max(100).default(20),

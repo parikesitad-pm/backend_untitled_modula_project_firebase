@@ -79,6 +79,11 @@ registry.registerPath({
   },
   responses: {
     200: jsonResponse(z.object({ success: z.literal(true), data: QuestionWithChoicesSchema }), 'Question updated'),
+    400: jsonResponse(ErrorResponseSchema, 'Validation error'),
+    401: jsonResponse(ErrorResponseSchema, 'Unauthorized'),
+    403: jsonResponse(ErrorResponseSchema, 'Forbidden'),
+    404: jsonResponse(ErrorResponseSchema, 'Question not found'),
+    409: jsonResponse(ErrorResponseSchema, 'Scoring fields locked because attempts exist (QUESTION_LOCKED)'),
   },
 });
 
@@ -93,6 +98,10 @@ registry.registerPath({
   },
   responses: {
     200: jsonResponse(z.object({ success: z.literal(true), data: z.object({ deleted: z.literal(true) }) }), 'Deleted'),
+    401: jsonResponse(ErrorResponseSchema, 'Unauthorized'),
+    403: jsonResponse(ErrorResponseSchema, 'Forbidden'),
+    404: jsonResponse(ErrorResponseSchema, 'Question not found'),
+    409: jsonResponse(ErrorResponseSchema, 'Question cannot be deleted because attempts exist (QUESTION_LOCKED)'),
   },
 });
 

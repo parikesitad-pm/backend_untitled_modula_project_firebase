@@ -1,6 +1,7 @@
 import { db } from '../../config/firebase';
 import { NotFoundError, ConflictError, BadRequestError } from '../../lib/errors';
 import { CreateActivityInput, UpdateActivityInput, ActivityQuery } from './activities.schema';
+import { getClock } from '../../lib/clock';
 
 export interface ActivityDocument extends CreateActivityInput {
   id: string;
@@ -12,6 +13,9 @@ export interface ActivityDocument extends CreateActivityInput {
 
 export class ActivitiesService {
   private col = db.collection('activities');
+  private questionsCol = db.collection('questions');
+  private choicesCol = db.collection('choices');
+  private attemptsCol = db.collection('attempts');
 
   async assertUniqueSlug(slug: string, excludeId?: string): Promise<void> {
     const snap = await this.col.where('slug', '==', slug).limit(1).get();
@@ -22,7 +26,7 @@ export class ActivitiesService {
 
   async create(input: CreateActivityInput, createdBy: string): Promise<ActivityDocument> {
     await this.assertUniqueSlug(input.slug);
-    const now = new Date().toISOString();
+    const now = getClock().nowIso();
     const docRef = this.col.doc();
 
     const activity: ActivityDocument = {
@@ -38,14 +42,41 @@ export class ActivitiesService {
     return activity;
   }
 
-  async list(filter: ActivityQuery): Promise<ActivityDocument[]> {
+  async list(
+    filter: ActivityQuery,
+    limit = 50,
+    cursor?: string
+  ): Promise<{ items: ActivityDocument[]; meta: { limit: number; nextCursor: string | null } }> {
+    const pageLimit = Math.min(200, Math.max(1, limit));
     let query: FirebaseFirestore.Query = this.col;
-    if (filter.status) query = query.where('status', '==', filter.status);
+
+    if (filter.status) {
+      query = query.where('status', '==', filter.status);
+    }
     if (filter.mode) query = query.where('mode', '==', filter.mode);
     if (filter.groupId) query = query.where('groupId', '==', filter.groupId);
 
+    query = query.orderBy('createdAt', 'desc').limit(pageLimit + 1);
+
+    if (cursor) {
+      const cursorDoc = await this.col.doc(cursor).get();
+      if (cursorDoc.exists) {
+        query = query.startAfter(cursorDoc);
+      }
+    }
+
     const snap = await query.get();
-    return snap.docs.map((d) => ({ id: d.id, ...d.data() } as ActivityDocument));
+    let docs = snap.docs;
+    if (!filter.status) {
+      docs = docs.filter((d) => d.data().status !== 'archived');
+    }
+
+    const hasMore = docs.length > pageLimit;
+    const finalDocs = hasMore ? docs.slice(0, pageLimit) : docs;
+    const nextCursor = hasMore ? finalDocs[finalDocs.length - 1].id : null;
+
+    const items = finalDocs.map((d) => ({ id: d.id, ...d.data() } as ActivityDocument));
+    return { items, meta: { limit: pageLimit, nextCursor } };
   }
 
   async getById(id: string): Promise<ActivityDocument> {
@@ -67,6 +98,21 @@ export class ActivitiesService {
 
   async update(id: string, input: UpdateActivityInput): Promise<ActivityDocument> {
     const current = await this.getById(id);
+    const attemptsSnap = await this.attemptsCol.where('activityId', '==', id).limit(1).get();
+    const hasAttempts = !attemptsSnap.empty;
+    const isLocked = current.status === 'published' || hasAttempts;
+
+    if (isLocked) {
+      if (input.slug && input.slug !== current.slug) {
+        throw new ConflictError('Cannot change slug of published activity or activity with attempts', 'IMMUTABLE_FIELD');
+      }
+      if (input.mode && input.mode !== current.mode) {
+        throw new ConflictError('Cannot change mode of published activity or activity with attempts', 'IMMUTABLE_FIELD');
+      }
+      if (input.groupId && input.groupId !== current.groupId) {
+        throw new ConflictError('Cannot change groupId of published activity or activity with attempts', 'IMMUTABLE_FIELD');
+      }
+    }
 
     if (input.slug && input.slug !== current.slug) {
       await this.assertUniqueSlug(input.slug, id);
@@ -78,33 +124,71 @@ export class ActivitiesService {
       throw new BadRequestError('opensAt must be earlier than closesAt');
     }
 
-    const updatedAt = new Date().toISOString();
-    const payload = { ...input, updatedAt };
-
-    await this.col.doc(id).update(payload);
+    const updatedAt = getClock().nowIso();
+    await this.col.doc(id).update({ ...input, updatedAt });
     return this.getById(id);
   }
 
   async delete(id: string): Promise<void> {
-    await this.getById(id);
-    await this.col.doc(id).delete();
+    const activity = await this.getById(id);
+    const attemptsSnap = await this.attemptsCol.where('activityId', '==', id).limit(1).get();
+
+    if (activity.status !== 'draft' || !attemptsSnap.empty) {
+      throw new ConflictError('Cannot delete activity with data or non-draft status. Please archive instead.', 'ACTIVITY_HAS_DATA');
+    }
+
+    const qSnap = await this.questionsCol.where('activityId', '==', id).get();
+    const batch = db.batch();
+    for (const qDoc of qSnap.docs) {
+      const cSnap = await this.choicesCol.where('questionId', '==', qDoc.id).get();
+      cSnap.docs.forEach((c) => batch.delete(c.ref));
+      batch.delete(qDoc.ref);
+    }
+    batch.delete(this.col.doc(id));
+    await batch.commit();
   }
 
   async publish(id: string): Promise<ActivityDocument> {
-    await this.getById(id);
-    await this.col.doc(id).update({
-      status: 'published',
-      updatedAt: new Date().toISOString(),
-    });
+    const activity = await this.getById(id);
+    const qSnap = await this.questionsCol.where('activityId', '==', id).get();
+    if (qSnap.empty) {
+      throw new BadRequestError('Cannot publish an activity without questions');
+    }
+
+    for (const qDoc of qSnap.docs) {
+      const cSnap = await this.choicesCol.where('questionId', '==', qDoc.id).where('isCorrect', '==', true).limit(1).get();
+      if (cSnap.empty) {
+        throw new BadRequestError(`Question '${qDoc.id}' has no correct choice`);
+      }
+    }
+
+    const now = getClock().now().getTime();
+    if (new Date(activity.closesAt).getTime() <= now) {
+      throw new BadRequestError('Cannot publish an activity whose closing time has already passed');
+    }
+
+    const updatedAt = getClock().nowIso();
+    await this.col.doc(id).update({ status: 'published', updatedAt });
     return this.getById(id);
   }
 
   async close(id: string): Promise<ActivityDocument> {
-    await this.getById(id);
-    await this.col.doc(id).update({
-      status: 'closed',
-      updatedAt: new Date().toISOString(),
-    });
+    const activity = await this.getById(id);
+    if (activity.status !== 'published') {
+      throw new BadRequestError('Only published activities can be closed');
+    }
+    const updatedAt = getClock().nowIso();
+    await this.col.doc(id).update({ status: 'closed', updatedAt });
+    return this.getById(id);
+  }
+
+  async archive(id: string): Promise<ActivityDocument> {
+    const activity = await this.getById(id);
+    if (activity.status !== 'closed') {
+      throw new BadRequestError('Only closed activities can be archived');
+    }
+    const updatedAt = getClock().nowIso();
+    await this.col.doc(id).update({ status: 'archived', updatedAt });
     return this.getById(id);
   }
 }

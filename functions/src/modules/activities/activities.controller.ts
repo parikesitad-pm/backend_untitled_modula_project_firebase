@@ -5,8 +5,10 @@ import { sendSuccess, sendCreated } from '../../lib/response';
 export class ActivitiesController {
   async list(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const items = await activitiesService.list(req.query as any);
-      sendSuccess(res, items);
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+      const cursor = req.query.cursor as string | undefined;
+      const result = await activitiesService.list(req.query as any, limit, cursor);
+      sendSuccess(res, result.items, undefined, 200, result.meta);
     } catch (err) {
       next(err);
     }
@@ -62,6 +64,15 @@ export class ActivitiesController {
     try {
       const closed = await activitiesService.close(req.params.id);
       sendSuccess(res, closed, 'Activity closed successfully');
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async archive(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const archived = await activitiesService.archive(req.params.id);
+      sendSuccess(res, archived, 'Activity archived successfully');
     } catch (err) {
       next(err);
     }

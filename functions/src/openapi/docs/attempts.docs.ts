@@ -7,6 +7,7 @@ registry.registerPath({
   path: '/api/attempts/{attemptId}/answers',
   tags: ['Attempts'],
   summary: 'Submit answer for a question in an active attempt',
+  security: [{ AttemptTokenAuth: [] }],
   request: {
     params: z.object({ attemptId: z.string() }),
     body: {
@@ -34,7 +35,9 @@ registry.registerPath({
       'Answer recorded'
     ),
     400: jsonResponse(ErrorResponseSchema, 'Attempt not in progress or invalid question'),
+    401: jsonResponse(ErrorResponseSchema, 'Invalid or missing X-Attempt-Token'),
     404: jsonResponse(ErrorResponseSchema, 'Attempt not found'),
+    409: jsonResponse(ErrorResponseSchema, 'Question already answered (ALREADY_ANSWERED)'),
   },
 });
 
@@ -43,6 +46,7 @@ registry.registerPath({
   path: '/api/attempts/{attemptId}/finish',
   tags: ['Attempts'],
   summary: 'Finish attempt and compute final score and leaderboard points',
+  security: [{ AttemptTokenAuth: [] }],
   request: {
     params: z.object({ attemptId: z.string() }),
   },
@@ -66,6 +70,7 @@ registry.registerPath({
       'Attempt completed'
     ),
     400: jsonResponse(ErrorResponseSchema, 'Attempt already finished or invalid'),
+    401: jsonResponse(ErrorResponseSchema, 'Invalid or missing X-Attempt-Token'),
     404: jsonResponse(ErrorResponseSchema, 'Attempt not found'),
   },
 });
@@ -75,11 +80,13 @@ registry.registerPath({
   path: '/api/attempts/{attemptId}',
   tags: ['Attempts'],
   summary: 'Get attempt status and details',
+  security: [{ AttemptTokenAuth: [] }],
   request: {
     params: z.object({ attemptId: z.string() }),
   },
   responses: {
     200: jsonResponse(z.object({ success: z.literal(true), data: z.record(z.unknown()) }), 'Attempt data'),
+    401: jsonResponse(ErrorResponseSchema, 'Invalid or missing X-Attempt-Token'),
     404: jsonResponse(ErrorResponseSchema, 'Attempt not found'),
   },
 });

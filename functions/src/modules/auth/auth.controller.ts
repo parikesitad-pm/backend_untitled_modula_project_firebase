@@ -6,7 +6,13 @@ import { UnauthorizedError } from '../../lib/errors';
 export class AuthController {
   async login(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const result = await authService.login(req.body);
+      const forwarded = req.headers['x-forwarded-for'];
+      const clientIp =
+        (typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : undefined) ||
+        req.ip ||
+        req.socket.remoteAddress ||
+        '127.0.0.1';
+      const result = await authService.login(req.body, clientIp);
       sendSuccess(res, result, 'Login successful');
     } catch (err) {
       next(err);

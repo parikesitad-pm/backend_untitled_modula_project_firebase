@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import request from 'supertest';
 import { app } from '../../src/app';
 import { seedTestOperators, clearCollection } from '../test-helper';
+import { MockClock, setSystemClock, SystemClock } from '../../src/lib/clock';
 
 describe('Auth & Activities Integration Tests', () => {
   let ownerToken: string;
@@ -153,9 +154,8 @@ describe('Auth & Activities Integration Tests', () => {
   });
 
   // 8. activity before open time blocked
-  it('8. blocks public access before open time', async () => {
-    const futureOpen = new Date(Date.now() + 86400000).toISOString();
-    const futureClose = new Date(Date.now() + 172800000).toISOString();
+  it('8. blocks public access before open time using fake clock', async () => {
+    setSystemClock(new MockClock('2026-05-01T00:00:00Z'));
 
     const actRes = await request(app)
       .post('/api/activities')
@@ -164,8 +164,19 @@ describe('Auth & Activities Integration Tests', () => {
         title: 'Future Activity',
         slug: 'future-act-slug',
         mode: 'quiz',
-        opensAt: futureOpen,
-        closesAt: futureClose,
+        opensAt: '2026-06-01T00:00:00Z',
+        closesAt: '2026-06-02T00:00:00Z',
+      });
+
+    await request(app)
+      .post(`/api/activities/${actRes.body.data.id}/questions`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        body: 'Q1',
+        choices: [
+          { body: 'A', isCorrect: true },
+          { body: 'B', isCorrect: false },
+        ],
       });
 
     await request(app)
@@ -175,12 +186,14 @@ describe('Auth & Activities Integration Tests', () => {
     const pubRes = await request(app).get('/api/public/future-act-slug');
     expect(pubRes.status).toBe(400);
     expect(pubRes.body.error.code).toBe('ACTIVITY_NOT_STARTED');
+
+    setSystemClock(new SystemClock());
   });
 
   // 9. activity after close time blocked
-  it('9. blocks public access after close time', async () => {
-    const pastOpen = new Date(Date.now() - 172800000).toISOString();
-    const pastClose = new Date(Date.now() - 86400000).toISOString();
+  it('9. blocks public access after close time using fake clock', async () => {
+    // When creating and publishing, set clock to before close
+    setSystemClock(new MockClock('2025-12-31T00:00:00Z'));
 
     const actRes = await request(app)
       .post('/api/activities')
@@ -189,17 +202,33 @@ describe('Auth & Activities Integration Tests', () => {
         title: 'Expired Activity',
         slug: 'expired-act-slug',
         mode: 'quiz',
-        opensAt: pastOpen,
-        closesAt: pastClose,
+        opensAt: '2026-01-01T00:00:00Z',
+        closesAt: '2026-01-02T00:00:00Z',
+      });
+
+    await request(app)
+      .post(`/api/activities/${actRes.body.data.id}/questions`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        body: 'Q1',
+        choices: [
+          { body: 'A', isCorrect: true },
+          { body: 'B', isCorrect: false },
+        ],
       });
 
     await request(app)
       .post(`/api/activities/${actRes.body.data.id}/publish`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
+    // Advance clock to after close
+    setSystemClock(new MockClock('2026-01-03T00:00:00Z'));
+
     const pubRes = await request(app).get('/api/public/expired-act-slug');
     expect(pubRes.status).toBe(400);
     expect(pubRes.body.error.code).toBe('ACTIVITY_CLOSED');
+
+    setSystemClock(new SystemClock());
   });
 
   // 19. correct answers not leaked publicly

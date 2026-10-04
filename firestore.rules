@@ -12,6 +12,11 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Login rate-limit attempts: server-only via Admin SDK
+    match /loginAttempts/{attemptId} {
+      allow read, write: if false;
+    }
+
     // Activities: public read if published; write only for operators
     match /activities/{activityId} {
       allow read: if isOperator() || (resource.data.status == 'published');
@@ -43,9 +48,13 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    // Leaderboard snapshots: public read, server-only write
+    // Leaderboard snapshots: operators can always read.
+    // Public can only read when activity is published/closed and leaderboard is visible.
     match /leaderboardSnapshots/{snapshotId} {
-      allow read: if true;
+      allow read: if isOperator() || (
+        resource.data.status in ['published', 'closed'] &&
+        resource.data.hideLeaderboardFromParticipants != true
+      );
       allow write: if false;
     }
 

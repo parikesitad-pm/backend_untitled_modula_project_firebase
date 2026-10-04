@@ -28,6 +28,7 @@ registry.registerPath({
       'Successful login'
     ),
     401: jsonResponse(ErrorResponseSchema, 'Invalid credentials'),
+    429: jsonResponse(ErrorResponseSchema, 'Too many login attempts. Account temporarily locked (RATE_LIMITED)'),
   },
 });
 

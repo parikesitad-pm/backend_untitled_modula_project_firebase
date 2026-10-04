@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { activitiesController } from './activities.controller';
-import { requireAuth } from '../../middleware/auth.middleware';
+import { requireAuth, requireCapability } from '../../middleware/auth.middleware';
 import { validateBody, validateQuery } from '../../middleware/validate.middleware';
 import {
   CreateActivitySchema,
@@ -31,16 +31,20 @@ router.patch('/:id', validateBody(UpdateActivitySchema), (req, res, next) => {
   activitiesController.update(req, res, next);
 });
 
-router.delete('/:id', (req, res, next) => {
+router.delete('/:id', requireCapability('activity:delete'), (req, res, next) => {
   activitiesController.delete(req, res, next);
 });
 
-router.post('/:id/publish', (req, res, next) => {
+router.post('/:id/publish', requireCapability('activity:lifecycle'), (req, res, next) => {
   activitiesController.publish(req, res, next);
 });
 
-router.post('/:id/close', (req, res, next) => {
+router.post('/:id/close', requireCapability('activity:lifecycle'), (req, res, next) => {
   activitiesController.close(req, res, next);
+});
+
+router.post('/:id/archive', requireCapability('activity:lifecycle'), (req, res, next) => {
+  activitiesController.archive(req, res, next);
 });
 
 router.get('/:id/questions', (req, res, next) => {
@@ -55,11 +59,11 @@ router.get('/:id/stats', (req, res, next) => {
   statsController.getActivityStats(req, res, next);
 });
 
-router.get('/:id/participants', (req, res, next) => {
+router.get('/:id/participants', requireCapability('read:pii'), (req, res, next) => {
   statsController.getParticipants(req, res, next);
 });
 
-router.get('/:id/responses', (req, res, next) => {
+router.get('/:id/responses', requireCapability('read:pii'), (req, res, next) => {
   statsController.getResponses(req, res, next);
 });
 

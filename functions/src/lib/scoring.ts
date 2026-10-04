@@ -162,3 +162,29 @@ export function calculateAttemptScores(
     perQuestion,
   };
 }
+
+export interface LeaderboardRankable {
+  attemptId: string;
+  finalScore: number;
+  leaderboardPoints: number;
+  durationMs: number;
+  completedAt: string | number | Date;
+}
+
+export function compareLeaderboardEntries(a: LeaderboardRankable, b: LeaderboardRankable): number {
+  if (b.leaderboardPoints !== a.leaderboardPoints) {
+    return b.leaderboardPoints - a.leaderboardPoints;
+  }
+  if (b.finalScore !== a.finalScore) {
+    return b.finalScore - a.finalScore;
+  }
+  if (a.durationMs !== b.durationMs) {
+    return a.durationMs - b.durationMs;
+  }
+  const timeA = new Date(a.completedAt).getTime();
+  const timeB = new Date(b.completedAt).getTime();
+  if (timeA !== timeB) {
+    return timeA - timeB;
+  }
+  return a.attemptId.localeCompare(b.attemptId);
+}

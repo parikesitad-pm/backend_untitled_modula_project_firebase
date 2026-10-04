@@ -61,6 +61,7 @@ registry.registerPath({
         success: z.literal(true),
         data: z.object({
           attempt: z.record(z.unknown()),
+          attemptToken: z.string().openapi({ description: 'One-time attempt token required in X-Attempt-Token header' }),
           participant: z.record(z.unknown()),
         }),
       }),
@@ -78,8 +79,22 @@ registry.registerPath({
   security: [{ BearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
+    query: z.object({
+      limit: z.string().optional().openapi({ example: '50', description: 'Page size (1-200, default 50)' }),
+      cursor: z.string().optional().openapi({ description: 'Next cursor ID from previous page meta' }),
+    }),
   },
   responses: {
-    200: jsonResponse(z.object({ success: z.literal(true), data: z.array(z.record(z.unknown())) }), 'Participants list'),
+    200: jsonResponse(
+      z.object({
+        success: z.literal(true),
+        data: z.array(z.record(z.unknown())),
+        meta: z.object({
+          limit: z.number(),
+          nextCursor: z.string().nullable(),
+        }).optional(),
+      }),
+      'Participants list'
+    ),
   },
 });

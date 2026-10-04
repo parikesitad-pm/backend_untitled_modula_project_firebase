@@ -106,12 +106,17 @@ registry.registerPath({
   path: '/api/activities/{id}',
   tags: ['Activities'],
   summary: 'Delete activity',
+  description: 'Deletes draft activity. Blocked if activity is not draft or has attempts.',
   security: [{ BearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
   },
   responses: {
     200: jsonResponse(z.object({ success: z.literal(true), data: z.object({ deleted: z.literal(true) }) }), 'Deleted'),
+    401: jsonResponse(ErrorResponseSchema, 'Unauthorized'),
+    403: jsonResponse(ErrorResponseSchema, 'Forbidden'),
+    404: jsonResponse(ErrorResponseSchema, 'Activity not found'),
+    409: jsonResponse(ErrorResponseSchema, 'Activity has data or is not in draft state (ACTIVITY_HAS_DATA)'),
   },
 });
 
@@ -126,6 +131,10 @@ registry.registerPath({
   },
   responses: {
     200: jsonResponse(z.object({ success: z.literal(true), data: ActivityOutSchema }), 'Published'),
+    400: jsonResponse(ErrorResponseSchema, 'Invalid state, missing questions, or invalid schedule'),
+    401: jsonResponse(ErrorResponseSchema, 'Unauthorized'),
+    403: jsonResponse(ErrorResponseSchema, 'Forbidden'),
+    404: jsonResponse(ErrorResponseSchema, 'Activity not found'),
   },
 });
 
@@ -140,5 +149,28 @@ registry.registerPath({
   },
   responses: {
     200: jsonResponse(z.object({ success: z.literal(true), data: ActivityOutSchema }), 'Closed'),
+    400: jsonResponse(ErrorResponseSchema, 'Only published activities can be closed'),
+    401: jsonResponse(ErrorResponseSchema, 'Unauthorized'),
+    403: jsonResponse(ErrorResponseSchema, 'Forbidden'),
+    404: jsonResponse(ErrorResponseSchema, 'Activity not found'),
+  },
+});
+
+registry.registerPath({
+  method: 'post',
+  path: '/api/activities/{id}/archive',
+  tags: ['Activities'],
+  summary: 'Archive activity',
+  description: 'Archives a closed activity. Preserves all durable data.',
+  security: [{ BearerAuth: [] }],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: jsonResponse(z.object({ success: z.literal(true), data: ActivityOutSchema }), 'Archived'),
+    400: jsonResponse(ErrorResponseSchema, 'Only closed activities can be archived'),
+    401: jsonResponse(ErrorResponseSchema, 'Unauthorized'),
+    403: jsonResponse(ErrorResponseSchema, 'Forbidden'),
+    404: jsonResponse(ErrorResponseSchema, 'Activity not found'),
   },
 });

@@ -2,7 +2,9 @@ import { db } from '../../config/firebase';
 import { NotFoundError } from '../../lib/errors';
 import { activitiesService } from '../activities/activities.service';
 import { questionsService } from '../questions/questions.service';
-import { ActivityStatsSummary, QuestionStat, PrePostComparison } from './stats.schema';
+import { normalizeParticipantCode } from '../participants/participants.schema';
+import { ActivityStatsSummary, QuestionStat, PrePostComparison, PrePostParticipantComparison } from './stats.schema';
+import { getClock } from '../../lib/clock';
 
 export class StatsService {
   private attemptsCol = db.collection('attempts');
@@ -20,11 +22,11 @@ export class StatsService {
 
     const totalParticipants = participantsSnap.size;
     const totalAttempts = attemptsSnap.size;
-    const completedAttemptsList = attemptsSnap.docs
+    const completedList = attemptsSnap.docs
       .map((d) => d.data())
       .filter((a) => a.status === 'completed');
 
-    const completedAttempts = completedAttemptsList.length;
+    const completedAttempts = completedList.length;
     const incompleteAttempts = totalAttempts - completedAttempts;
     const completionRate = totalAttempts > 0 ? Number(((completedAttempts / totalAttempts) * 100).toFixed(2)) : 0;
 
@@ -34,7 +36,7 @@ export class StatsService {
     let totalDurationMs = 0;
     let fastestDurationMs = completedAttempts > 0 ? Infinity : 0;
 
-    for (const a of completedAttemptsList) {
+    for (const a of completedList) {
       const score = Number(a.finalScore || 0);
       const duration = Number(a.durationMs || 0);
       totalScore += score;
@@ -64,20 +66,35 @@ export class StatsService {
         averageDurationMs,
         fastestDurationMs: fastest,
       },
-      updatedAt: new Date().toISOString(),
+      updatedAt: getClock().nowIso(),
     };
 
     await this.snapshotsCol.doc(activityId).set(summary);
     return summary;
   }
 
-  async getActivityParticipants(activityId: string): Promise<any[]> {
+  async getActivityParticipants(
+    activityId: string,
+    limit = 50,
+    cursor?: string
+  ): Promise<{ items: any[]; meta: { limit: number; nextCursor: string | null } }> {
     await activitiesService.getById(activityId);
+    const pageLimit = Math.min(200, Math.max(1, limit));
+
+    let query = this.participantsCol.where('activityId', '==', activityId).orderBy('createdAt', 'asc').limit(pageLimit + 1);
+    if (cursor) {
+      const cursorDoc = await this.participantsCol.doc(cursor).get();
+      if (cursorDoc.exists) query = query.startAfter(cursorDoc);
+    }
 
     const [pSnap, aSnap] = await Promise.all([
-      this.participantsCol.where('activityId', '==', activityId).get(),
+      query.get(),
       this.attemptsCol.where('activityId', '==', activityId).get(),
     ]);
+
+    const hasMore = pSnap.docs.length > pageLimit;
+    const pDocs = hasMore ? pSnap.docs.slice(0, pageLimit) : pSnap.docs;
+    const nextCursor = hasMore ? pDocs[pDocs.length - 1].id : null;
 
     const attemptsByParticipant = new Map<string, any[]>();
     aSnap.docs.forEach((doc) => {
@@ -87,7 +104,7 @@ export class StatsService {
       attemptsByParticipant.set(doc.data().participantId, arr);
     });
 
-    return pSnap.docs.map((doc) => {
+    const items = pDocs.map((doc) => {
       const p = { id: doc.id, ...doc.data() };
       const attempts = attemptsByParticipant.get(doc.id) || [];
       const latestAttempt = attempts[attempts.length - 1];
@@ -99,12 +116,30 @@ export class StatsService {
         attempts,
       };
     });
+
+    return { items, meta: { limit: pageLimit, nextCursor } };
   }
 
-  async getActivityResponses(activityId: string): Promise<any[]> {
+  async getActivityResponses(
+    activityId: string,
+    limit = 50,
+    cursor?: string
+  ): Promise<{ items: any[]; meta: { limit: number; nextCursor: string | null } }> {
     await activitiesService.getById(activityId);
-    const snap = await this.answersCol.where('activityId', '==', activityId).get();
-    return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    const pageLimit = Math.min(200, Math.max(1, limit));
+
+    let query = this.answersCol.where('activityId', '==', activityId).orderBy('serverReceivedAt', 'asc').limit(pageLimit + 1);
+    if (cursor) {
+      const cursorDoc = await this.answersCol.doc(cursor).get();
+      if (cursorDoc.exists) query = query.startAfter(cursorDoc);
+    }
+
+    const snap = await query.get();
+    const hasMore = snap.docs.length > pageLimit;
+    const docs = hasMore ? snap.docs.slice(0, pageLimit) : snap.docs;
+    const nextCursor = hasMore ? docs[docs.length - 1].id : null;
+
+    return { items: docs.map((d) => ({ id: d.id, ...d.data() })), meta: { limit: pageLimit, nextCursor } };
   }
 
   async getQuestionStats(activityId: string): Promise<QuestionStat[]> {
@@ -134,9 +169,7 @@ export class StatsService {
 
   async getGroupComparison(groupId: string): Promise<PrePostComparison> {
     const snap = await db.collection('activities').where('groupId', '==', groupId).get();
-    if (snap.empty) {
-      throw new NotFoundError(`No activities found for group '${groupId}'`);
-    }
+    if (snap.empty) throw new NotFoundError(`No activities found for group '${groupId}'`);
 
     const activities = snap.docs.map((d) => ({ id: d.id, ...d.data() } as any));
     const pre = activities.find((a) => a.phase === 'pre') || null;
@@ -149,8 +182,66 @@ export class StatsService {
 
     const preAvg = preStats ? preStats.scores.average : 0;
     const postAvg = postStats ? postStats.scores.average : 0;
-    const scoreDelta = Number((postAvg - preAvg).toFixed(2));
+    const overallDelta = Number((postAvg - preAvg).toFixed(2));
 
+    const [preParts, postParts, preAttempts, postAttempts] = await Promise.all([
+      pre ? this.participantsCol.where('activityId', '==', pre.id).get() : { docs: [] },
+      post ? this.participantsCol.where('activityId', '==', post.id).get() : { docs: [] },
+      pre ? this.attemptsCol.where('activityId', '==', pre.id).where('status', '==', 'completed').get() : { docs: [] },
+      post ? this.attemptsCol.where('activityId', '==', post.id).where('status', '==', 'completed').get() : { docs: [] },
+    ]);
+
+    const preScoreByPartId = new Map<string, number>();
+    preAttempts.docs.forEach((d) => preScoreByPartId.set(d.data().participantId, d.data().finalScore));
+    const postScoreByPartId = new Map<string, number>();
+    postAttempts.docs.forEach((d) => postScoreByPartId.set(d.data().participantId, d.data().finalScore));
+
+    const participantMap = new Map<string, { name: string; preScore: number | null; postScore: number | null }>();
+    preParts.docs.forEach((d) => {
+      const code = normalizeParticipantCode(d.data().participantCode);
+      const score = preScoreByPartId.get(d.id) ?? null;
+      participantMap.set(code, { name: d.data().name, preScore: score, postScore: null });
+    });
+
+    postParts.docs.forEach((d) => {
+      const code = normalizeParticipantCode(d.data().participantCode);
+      const score = postScoreByPartId.get(d.id) ?? null;
+      const existing = participantMap.get(code);
+      if (existing) {
+        existing.postScore = score;
+      } else {
+        participantMap.set(code, { name: d.data().name, preScore: null, postScore: score });
+      }
+    });
+
+    const participantsList: PrePostParticipantComparison[] = [];
+    let matchedDeltaSum = 0;
+    let matchedCount = 0;
+    let unmatchedCount = 0;
+
+    participantMap.forEach((val, code) => {
+      const isMatched = val.preScore !== null && val.postScore !== null;
+      const delta = isMatched ? Number((val.postScore! - val.preScore!).toFixed(2)) : null;
+
+      if (isMatched) {
+        matchedCount++;
+        matchedDeltaSum += delta!;
+      } else {
+        unmatchedCount++;
+      }
+
+      participantsList.push({
+        participantCode: code,
+        name: val.name,
+        preScore: val.preScore,
+        postScore: val.postScore,
+        scoreDelta: delta,
+        delta,
+        matched: isMatched,
+      });
+    });
+
+    const matchedAverageDelta = matchedCount > 0 ? Number((matchedDeltaSum / matchedCount).toFixed(2)) : 0;
     const [preQStats, postQStats] = await Promise.all([
       pre ? this.getQuestionStats(pre.id) : [],
       post ? this.getQuestionStats(post.id) : [],
@@ -175,9 +266,12 @@ export class StatsService {
       groupId,
       preActivity: pre ? { id: pre.id, title: pre.title, averageScore: preAvg } : null,
       postActivity: post ? { id: post.id, title: post.title, averageScore: postAvg } : null,
-      scoreDelta,
-      pairedParticipantsCount: 0,
-      pairedAverageDelta: scoreDelta,
+      scoreDelta: overallDelta,
+      matchedCount,
+      unmatchedCount,
+      totalParticipants: participantMap.size,
+      matchedAverageDelta,
+      participants: participantsList,
       questionStatsDelta,
     };
   }

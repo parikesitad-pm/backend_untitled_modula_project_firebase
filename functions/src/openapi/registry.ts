@@ -12,6 +12,13 @@ export const BearerAuth = registry.registerComponent('securitySchemes', 'BearerA
   description: 'Firebase ID Token or Custom Token passed in Authorization header',
 });
 
+export const AttemptTokenAuth = registry.registerComponent('securitySchemes', 'AttemptTokenAuth', {
+  type: 'apiKey',
+  in: 'header',
+  name: 'X-Attempt-Token',
+  description: 'Participant attempt token returned when starting an attempt',
+});
+
 export const ErrorResponseSchema = registry.register(
   'ErrorResponse',
   z.object({

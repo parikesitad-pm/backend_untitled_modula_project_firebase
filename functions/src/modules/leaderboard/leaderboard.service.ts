@@ -4,58 +4,38 @@ import { activitiesService } from '../activities/activities.service';
 import { participantsService } from '../participants/participants.service';
 import { AuthOperator } from '../../middleware/auth.middleware';
 import { LeaderboardResponse, LeaderboardEntry } from './leaderboard.schema';
+import { compareLeaderboardEntries } from '../../lib/scoring';
+import { getClock } from '../../lib/clock';
 
 export class LeaderboardService {
   private attemptsCol = db.collection('attempts');
   private snapshotsCol = db.collection('leaderboardSnapshots');
 
-  async getLeaderboard(slug: string, operator?: AuthOperator): Promise<LeaderboardResponse> {
-    const activity = await activitiesService.getBySlug(slug);
-
-    if (activity.settings?.hideLeaderboardFromParticipants && !operator) {
-      throw new ForbiddenError('Leaderboard is hidden by the organizer', 'LEADERBOARD_HIDDEN');
-    }
+  async rebuildLeaderboardSnapshot(activityId: string): Promise<LeaderboardResponse> {
+    const activity = await activitiesService.getById(activityId);
 
     const attemptsSnap = await this.attemptsCol
-      .where('activityId', '==', activity.id)
+      .where('activityId', '==', activityId)
       .where('status', '==', 'completed')
       .get();
 
     const attempts = attemptsSnap.docs.map((d) => ({ id: d.id, ...d.data() } as any));
-
-    attempts.sort((a, b) => {
-      if (b.leaderboardPoints !== a.leaderboardPoints) {
-        return b.leaderboardPoints - a.leaderboardPoints;
-      }
-      if (a.durationMs !== b.durationMs) {
-        return a.durationMs - b.durationMs;
-      }
-      return new Date(a.completedAt).getTime() - new Date(b.completedAt).getTime();
-    });
+    attempts.sort(compareLeaderboardEntries);
 
     const entries: LeaderboardEntry[] = [];
     for (let i = 0; i < attempts.length; i++) {
       const att = attempts[i];
-      let pName = 'Anonymous';
-      let pCode = '';
-      let pDivision = null;
-
+      let displayName = 'Anonymous';
       try {
         const p = await participantsService.getById(att.participantId);
-        pName = p.name;
-        pCode = p.participantCode;
-        pDivision = p.division || null;
+        displayName = p.name;
       } catch (_e) {
-        // fallback to placeholder if participant doc missing
+        // fallback
       }
 
       entries.push({
         rank: i + 1,
-        attemptId: att.id,
-        participantId: att.participantId,
-        participantName: pName,
-        participantCode: pCode,
-        division: pDivision,
+        displayName,
         finalScore: att.finalScore,
         leaderboardPoints: att.leaderboardPoints,
         durationMs: att.durationMs,
@@ -70,11 +50,50 @@ export class LeaderboardService {
       top5: entries.slice(0, 5),
       others: entries.slice(5),
       totalCompleted: entries.length,
-      updatedAt: new Date().toISOString(),
+      updatedAt: getClock().nowIso(),
     };
 
-    // Update derived Firestore snapshot asynchronously
-    await this.snapshotsCol.doc(activity.id).set(response);
+    await this.snapshotsCol.doc(activity.id).set({
+      ...response,
+      status: activity.status,
+      hideLeaderboardFromParticipants: !!activity.settings?.hideLeaderboardFromParticipants,
+    });
+    return response;
+  }
+
+  async getLeaderboard(slug: string, operator?: AuthOperator, limit?: number): Promise<LeaderboardResponse> {
+    const activity = await activitiesService.getBySlug(slug);
+
+    if (activity.settings?.hideLeaderboardFromParticipants && !operator) {
+      throw new ForbiddenError('Leaderboard is hidden by the organizer', 'LEADERBOARD_HIDDEN');
+    }
+
+    const snapshotDoc = await this.snapshotsCol.doc(activity.id).get();
+    let response: LeaderboardResponse;
+
+    if (snapshotDoc.exists) {
+      const data = snapshotDoc.data()!;
+      response = {
+        activityId: data.activityId,
+        activityTitle: data.activityTitle,
+        slug: data.slug,
+        top5: data.top5 || [],
+        others: data.others || [],
+        totalCompleted: data.totalCompleted || 0,
+        updatedAt: data.updatedAt,
+      };
+    } else {
+      response = await this.rebuildLeaderboardSnapshot(activity.id);
+    }
+
+    if (limit && limit > 0) {
+      const allEntries = [...response.top5, ...response.others].slice(0, limit);
+      return {
+        ...response,
+        top5: allEntries.slice(0, 5),
+        others: allEntries.slice(5),
+      };
+    }
 
     return response;
   }

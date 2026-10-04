@@ -5,6 +5,7 @@ import {
   calculateQuestionScore,
   calculateFinalScore,
   calculateAttemptScores,
+  compareLeaderboardEntries,
   ScoringQuestion,
 } from '../../src/lib/scoring';
 
@@ -47,7 +48,23 @@ describe('Scoring Module', () => {
       correctChoiceIds: ['c1'],
     };
 
-    it('awards 0 earned weight, 0 speed bonus, and 0 leaderboard points for wrong answer', () => {
+    it('scores correct answer without speed bonus', () => {
+      const qNoSpeed: ScoringQuestion = { ...question, speedBonusEnabled: false };
+      const result = calculateQuestionScore(qNoSpeed, {
+        questionId: 'q1',
+        selectedChoiceIds: ['c1'],
+        enteredAt: '2026-01-01T00:00:00Z',
+        answeredAt: '2026-01-01T00:00:02Z',
+        durationMs: 2000,
+      });
+
+      expect(result.isCorrect).toBe(true);
+      expect(result.earnedWeight).toBe(2);
+      expect(result.speedBonus).toBe(0);
+      expect(result.leaderboardPoints).toBe(2);
+    });
+
+    it('scores wrong answer with zero points', () => {
       const result = calculateQuestionScore(question, {
         questionId: 'q1',
         selectedChoiceIds: ['wrong'],
@@ -63,7 +80,7 @@ describe('Scoring Module', () => {
       expect(result.durationMs).toBe(2000);
     });
 
-    it('calculates speed bonus when answered fast and speed bonus is enabled', () => {
+    it('applies speed bonus when answered fast and speed bonus is enabled', () => {
       // 5 seconds out of 10s -> speedRatio = 0.5. Cap is 20% of weight (2) = 0.4.
       // speedBonus = 2 * 0.20 * 0.5 = 0.20. Leaderboard points = 2 + 0.20 = 2.20
       const result = calculateQuestionScore(question, {
@@ -94,21 +111,6 @@ describe('Scoring Module', () => {
       expect(result.speedBonus).toBe(0);
       expect(result.leaderboardPoints).toBe(2);
     });
-
-    it('respects speedBonusEnabled=false', () => {
-      const noSpeedQ: ScoringQuestion = { ...question, speedBonusEnabled: false };
-      const result = calculateQuestionScore(noSpeedQ, {
-        questionId: 'q1',
-        selectedChoiceIds: ['c1'],
-        enteredAt: '2026-01-01T00:00:00Z',
-        answeredAt: '2026-01-01T00:00:01Z',
-        durationMs: 1000,
-      });
-
-      expect(result.isCorrect).toBe(true);
-      expect(result.speedBonus).toBe(0);
-      expect(result.leaderboardPoints).toBe(2);
-    });
   });
 
   describe('calculateFinalScore', () => {
@@ -120,50 +122,110 @@ describe('Scoring Module', () => {
     });
   });
 
-  describe('calculateAttemptScores', () => {
-    it('aggregates multiple questions with custom weights and speed bonus', () => {
+  describe('calculateAttemptScores - Split Tests', () => {
+    it('calculates score for correct answers', () => {
+      const questions: ScoringQuestion[] = [
+        { id: 'q1', weight: 1, correctChoiceIds: ['c1'] },
+      ];
+      const answers = [
+        { questionId: 'q1', selectedChoiceIds: ['c1'], durationMs: 2000 },
+      ];
+      const outcome = calculateAttemptScores(questions, answers);
+      expect(outcome.correctCount).toBe(1);
+      expect(outcome.earnedWeight).toBe(1);
+      expect(outcome.finalScore).toBe(100);
+    });
+
+    it('calculates score for wrong answers', () => {
+      const questions: ScoringQuestion[] = [
+        { id: 'q1', weight: 1, correctChoiceIds: ['c1'] },
+      ];
+      const answers = [
+        { questionId: 'q1', selectedChoiceIds: ['c2'], durationMs: 2000 },
+      ];
+      const outcome = calculateAttemptScores(questions, answers);
+      expect(outcome.correctCount).toBe(0);
+      expect(outcome.earnedWeight).toBe(0);
+      expect(outcome.finalScore).toBe(0);
+    });
+
+    it('calculates custom weight contribution correctly', () => {
+      const questions: ScoringQuestion[] = [
+        { id: 'q1', weight: 1, correctChoiceIds: ['c1'] },
+        { id: 'q2', weight: 4, correctChoiceIds: ['c2'] },
+      ];
+      const answers = [
+        { questionId: 'q1', selectedChoiceIds: ['c1'], durationMs: 1000 }, // 1 earned
+        { questionId: 'q2', selectedChoiceIds: ['wrong'], durationMs: 1000 }, // 0 earned
+      ];
+      const outcome = calculateAttemptScores(questions, answers);
+      expect(outcome.totalWeight).toBe(5);
+      expect(outcome.earnedWeight).toBe(1);
+      expect(outcome.finalScore).toBe(20); // 1/5 = 20%
+    });
+
+    it('calculates speed bonus contribution into leaderboard points', () => {
       const questions: ScoringQuestion[] = [
         {
           id: 'q1',
-          weight: 1,
+          weight: 2,
           speedBonusEnabled: true,
           speedBonusPercent: 20,
           timeReferenceSeconds: 10,
           correctChoiceIds: ['c1'],
         },
-        {
-          id: 'q2',
-          weight: 3,
-          speedBonusEnabled: false,
-          correctChoiceIds: ['c3'],
-        },
       ];
-
       const answers = [
-        {
-          questionId: 'q1',
-          selectedChoiceIds: ['c1'],
-          enteredAt: '2026-01-01T00:00:00Z',
-          answeredAt: '2026-01-01T00:00:05Z',
-          durationMs: 5000,
-        },
-        {
-          questionId: 'q2',
-          selectedChoiceIds: ['c3'],
-          enteredAt: '2026-01-01T00:00:00Z',
-          answeredAt: '2026-01-01T00:00:08Z',
-          durationMs: 8000,
-        },
+        { questionId: 'q1', selectedChoiceIds: ['c1'], durationMs: 0 }, // instant -> max bonus (0.4)
       ];
-
       const outcome = calculateAttemptScores(questions, answers);
-      expect(outcome.totalWeight).toBe(4);
-      expect(outcome.earnedWeight).toBe(4);
-      expect(outcome.finalScore).toBe(100);
-      expect(outcome.correctCount).toBe(2);
-      expect(outcome.totalDurationMs).toBe(13000);
-      // q1: 1 + 0.10 speedBonus = 1.10. q2: 3 + 0 = 3. Total points = 4.10
-      expect(outcome.totalLeaderboardPoints).toBe(4.1);
+      expect(outcome.totalLeaderboardPoints).toBe(2.4);
+    });
+
+    it('calculates total attempt duration as sum of question durations', () => {
+      const questions: ScoringQuestion[] = [
+        { id: 'q1', weight: 1, correctChoiceIds: ['c1'] },
+        { id: 'q2', weight: 1, correctChoiceIds: ['c2'] },
+      ];
+      const answers = [
+        { questionId: 'q1', selectedChoiceIds: ['c1'], durationMs: 3500 },
+        { questionId: 'q2', selectedChoiceIds: ['c2'], durationMs: 4500 },
+      ];
+      const outcome = calculateAttemptScores(questions, answers);
+      expect(outcome.totalDurationMs).toBe(8000);
+    });
+  });
+
+  describe('compareLeaderboardEntries - Comparator Ties', () => {
+    it('breaks ties using points desc, finalScore desc, duration asc, completedAt asc, attemptId asc', () => {
+      const base = {
+        attemptId: 'att-b',
+        finalScore: 100,
+        leaderboardPoints: 10,
+        durationMs: 5000,
+        completedAt: '2026-01-01T00:00:00Z',
+      };
+
+      // 1. Points difference (higher points is better -> should come before, negative diff)
+      const higherPoints = { ...base, attemptId: 'att-a', leaderboardPoints: 12 };
+      expect(compareLeaderboardEntries(higherPoints, base)).toBeLessThan(0);
+
+      // 2. Points equal, finalScore difference
+      const higherScore = { ...base, attemptId: 'att-c', leaderboardPoints: 10, finalScore: 90 };
+      expect(compareLeaderboardEntries(base, higherScore)).toBeLessThan(0);
+
+      // 3. Score equal, duration difference (lower duration is better)
+      const faster = { ...base, attemptId: 'att-d', durationMs: 4000 };
+      expect(compareLeaderboardEntries(faster, base)).toBeLessThan(0);
+
+      // 4. Duration equal, earlier completion date is better
+      const earlier = { ...base, attemptId: 'att-e', completedAt: '2025-12-31T23:59:59Z' };
+      expect(compareLeaderboardEntries(earlier, base)).toBeLessThan(0);
+
+      // 5. Complete tie broken by attemptId asc
+      const attA = { ...base, attemptId: 'att-1' };
+      const attB = { ...base, attemptId: 'att-2' };
+      expect(compareLeaderboardEntries(attA, attB)).toBeLessThan(0);
     });
   });
 });

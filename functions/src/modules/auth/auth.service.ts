@@ -1,34 +1,52 @@
 import { db, auth } from '../../config/firebase';
-import { verifyAccessCode, hashAccessCode } from '../../lib/hash';
+import { verifyAccessCode, hashAccessCode, performDummyVerification } from '../../lib/hash';
 import { UnauthorizedError, NotFoundError } from '../../lib/errors';
 import { LoginRequest, LoginResponse, OperatorResponse } from './auth.schema';
 import { OperatorRole } from '../../middleware/auth.middleware';
+import { rateLimiterService } from './rate-limiter.service';
 
 export class AuthService {
   private operatorsCol = db.collection('operators');
 
-  async login(input: LoginRequest): Promise<LoginResponse> {
+  async login(input: LoginRequest, clientIp = '127.0.0.1'): Promise<LoginResponse> {
     const normalized = input.username.trim().toLowerCase();
+    const userKey = `user_${normalized}`;
+    const ipKey = `ip_${clientIp}`;
+
+    await rateLimiterService.checkRateLimit(userKey);
+    await rateLimiterService.checkRateLimit(ipKey);
+
     const snapshot = await this.operatorsCol
       .where('usernameNormalized', '==', normalized)
       .limit(1)
       .get();
 
     if (snapshot.empty) {
-      throw new UnauthorizedError('Invalid username or access code');
+      await performDummyVerification(input.accessCode);
+      await rateLimiterService.recordFailure(userKey);
+      await rateLimiterService.recordFailure(ipKey);
+      throw new UnauthorizedError('Invalid credentials');
     }
 
     const doc = snapshot.docs[0];
     const data = doc.data();
 
     if (!data.active) {
-      throw new UnauthorizedError('Operator account is deactivated');
+      await performDummyVerification(input.accessCode);
+      await rateLimiterService.recordFailure(userKey);
+      await rateLimiterService.recordFailure(ipKey);
+      throw new UnauthorizedError('Invalid credentials');
     }
 
     const valid = await verifyAccessCode(input.accessCode, data.accessCodeHash);
     if (!valid) {
-      throw new UnauthorizedError('Invalid username or access code');
+      await rateLimiterService.recordFailure(userKey);
+      await rateLimiterService.recordFailure(ipKey);
+      throw new UnauthorizedError('Invalid credentials');
     }
+
+    await rateLimiterService.reset(userKey);
+    await rateLimiterService.reset(ipKey);
 
     const uid = doc.id;
     const role = (data.role || 'operator') as OperatorRole;

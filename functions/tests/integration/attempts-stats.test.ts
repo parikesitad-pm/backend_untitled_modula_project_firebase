@@ -88,7 +88,9 @@ describe('Attempts, Scoring, Leaderboard & Stats Integration Tests', () => {
 
   // 10. start attempt
   let attempt1Id: string;
-  it('10. allows participant to start attempt', async () => {
+  let attempt1Token: string;
+
+  it('10. allows participant to start attempt and returns attemptToken', async () => {
     const res = await request(app)
       .post(`/api/public/${testSlug}/start`)
       .send({
@@ -100,39 +102,44 @@ describe('Attempts, Scoring, Leaderboard & Stats Integration Tests', () => {
     expect(res.status).toBe(201);
     expect(res.body.success).toBe(true);
     expect(res.body.data.attempt.status).toBe('in_progress');
+    expect(res.body.data.attemptToken).toBeDefined();
+
     attempt1Id = res.body.data.attempt.id;
+    attempt1Token = res.body.data.attemptToken;
   });
 
-  // 11. submit correct answer & 14. speed bonus calculation
-  it('11 & 14. submits correct answer and calculates speed bonus', async () => {
+  // 11. submit correct answer
+  it('11. submits correct answer with X-Attempt-Token header', async () => {
     const res = await request(app)
       .post(`/api/attempts/${attempt1Id}/answers`)
+      .set('X-Attempt-Token', attempt1Token)
       .send({
         questionId: q1Id,
         selectedChoiceIds: [q1CorrectChoiceId],
         enteredAt: '2026-01-01T00:00:00Z',
         answeredAt: '2026-01-01T00:00:05Z',
-        durationMs: 5000,
       });
 
     expect(res.status).toBe(200);
     expect(res.body.data.recorded).toBe(true);
   });
 
-  // 12. submit wrong answer & 13. custom question weight & 15. final score
-  it('12, 13 & 15. submits wrong answer and computes final score with weights', async () => {
+  // 12. submit wrong answer & custom question weight & final score
+  it('12, 13 & 15. submits answers and computes final score with weights', async () => {
     // Participant 1 submits correct for question 2 as well
     await request(app)
       .post(`/api/attempts/${attempt1Id}/answers`)
+      .set('X-Attempt-Token', attempt1Token)
       .send({
         questionId: q2Id,
         selectedChoiceIds: [q2CorrectChoiceId],
         enteredAt: '2026-01-01T00:00:00Z',
         answeredAt: '2026-01-01T00:00:10Z',
-        durationMs: 10000,
       });
 
-    const finishRes = await request(app).post(`/api/attempts/${attempt1Id}/finish`);
+    const finishRes = await request(app)
+      .post(`/api/attempts/${attempt1Id}/finish`)
+      .set('X-Attempt-Token', attempt1Token);
     expect(finishRes.status).toBe(200);
     // Weight: q1=1, q2=3. Both correct -> 4/4 * 100 = 100%
     expect(finishRes.body.data.summary.finalScore).toBe(100);
@@ -146,30 +153,29 @@ describe('Attempts, Scoring, Leaderboard & Stats Integration Tests', () => {
         participantCode: 'EMP-02',
       });
     const attempt2Id = start2.body.data.attempt.id;
+    const attempt2Token = start2.body.data.attemptToken;
 
     // Wrong answer on q1
     await request(app)
       .post(`/api/attempts/${attempt2Id}/answers`)
+      .set('X-Attempt-Token', attempt2Token)
       .send({
         questionId: q1Id,
         selectedChoiceIds: [q1WrongChoiceId],
-        enteredAt: '2026-01-01T00:00:00Z',
-        answeredAt: '2026-01-01T00:00:02Z',
-        durationMs: 2000,
       });
 
     // Correct answer on q2 (weight 3)
     await request(app)
       .post(`/api/attempts/${attempt2Id}/answers`)
+      .set('X-Attempt-Token', attempt2Token)
       .send({
         questionId: q2Id,
         selectedChoiceIds: [q2CorrectChoiceId],
-        enteredAt: '2026-01-01T00:00:00Z',
-        answeredAt: '2026-01-01T00:00:12Z',
-        durationMs: 12000,
       });
 
-    const finish2 = await request(app).post(`/api/attempts/${attempt2Id}/finish`);
+    const finish2 = await request(app)
+      .post(`/api/attempts/${attempt2Id}/finish`)
+      .set('X-Attempt-Token', attempt2Token);
     expect(finish2.status).toBe(200);
     // 3 out of 4 -> 75%
     expect(finish2.body.data.summary.finalScore).toBe(75);
@@ -177,15 +183,15 @@ describe('Attempts, Scoring, Leaderboard & Stats Integration Tests', () => {
   });
 
   // 16. leaderboard ordering
-  it('16. orders leaderboard by leaderboard points and duration', async () => {
+  it('16. orders leaderboard by leaderboard points and duration without PII', async () => {
     const lbRes = await request(app).get(`/api/leaderboards/${testSlug}`);
     expect(lbRes.status).toBe(200);
     expect(lbRes.body.data.top5.length).toBe(2);
     // Alice (100% + speed bonus) should be rank 1
-    expect(lbRes.body.data.top5[0].participantName).toBe('Alice Wonder');
+    expect(lbRes.body.data.top5[0].displayName).toBe('Alice Wonder');
     expect(lbRes.body.data.top5[0].rank).toBe(1);
     // Bob should be rank 2
-    expect(lbRes.body.data.top5[1].participantName).toBe('Bob Builder');
+    expect(lbRes.body.data.top5[1].displayName).toBe('Bob Builder');
     expect(lbRes.body.data.top5[1].rank).toBe(2);
   });
 
@@ -210,7 +216,7 @@ describe('Attempts, Scoring, Leaderboard & Stats Integration Tests', () => {
   });
 
   // 18. pre/post comparison
-  it('18. compares pre and post activities within the same group', async () => {
+  it('18. compares pre and post activities with matched, only-pre, and only-post participants', async () => {
     // Create Post Activity in math-group-2026
     const postAct = await request(app)
       .post('/api/activities')
@@ -244,31 +250,75 @@ describe('Attempts, Scoring, Leaderboard & Stats Integration Tests', () => {
       .post(`/api/activities/${postActId}/publish`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
-    // Complete attempt on post test with 100%
-    const pStart = await request(app)
+    // Alice (EMP-01) completes Post test -> Matched!
+    const alicePost = await request(app)
       .post('/api/public/math-posttest/start')
-      .send({ name: 'Charlie', participantCode: 'EMP-03' });
-    const postAttemptId = pStart.body.data.attempt.id;
+      .send({ name: 'Alice Wonder', participantCode: 'emp-01' }); // lowercase normalized
+    const aliceAttemptId = alicePost.body.data.attempt.id;
+    const aliceToken = alicePost.body.data.attemptToken;
 
     await request(app)
-      .post(`/api/attempts/${postAttemptId}/answers`)
+      .post(`/api/attempts/${aliceAttemptId}/answers`)
+      .set('X-Attempt-Token', aliceToken)
       .send({
         questionId: qPost.body.data.id,
         selectedChoiceIds: [qPostCorrect],
-        enteredAt: '2026-01-01T00:00:00Z',
-        answeredAt: '2026-01-01T00:00:03Z',
       });
 
-    await request(app).post(`/api/attempts/${postAttemptId}/finish`);
+    await request(app)
+      .post(`/api/attempts/${aliceAttemptId}/finish`)
+      .set('X-Attempt-Token', aliceToken);
 
-    // Fetch comparison
+    // Charlie (EMP-03) completes Post test only -> Only-post!
+    const charliePost = await request(app)
+      .post('/api/public/math-posttest/start')
+      .send({ name: 'Charlie', participantCode: 'EMP-03' });
+    const charlieAttemptId = charliePost.body.data.attempt.id;
+    const charlieToken = charliePost.body.data.attemptToken;
+
+    await request(app)
+      .post(`/api/attempts/${charlieAttemptId}/answers`)
+      .set('X-Attempt-Token', charlieToken)
+      .send({
+        questionId: qPost.body.data.id,
+        selectedChoiceIds: [qPostCorrect],
+      });
+
+    await request(app)
+      .post(`/api/attempts/${charlieAttemptId}/finish`)
+      .set('X-Attempt-Token', charlieToken);
+
+    // Fetch pre/post comparison
     const compRes = await request(app)
       .get('/api/groups/math-group-2026/comparison')
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(compRes.status).toBe(200);
-    expect(compRes.body.data.preActivity).toBeDefined();
-    expect(compRes.body.data.postActivity).toBeDefined();
-    expect(compRes.body.data.scoreDelta).toBeDefined();
+    const data = compRes.body.data;
+    expect(data.preActivity.title).toBe('Math Challenge');
+    expect(data.postActivity.title).toBe('Math Post-Test');
+    expect(data.matchedCount).toBe(1); // Alice (EMP-01)
+    expect(data.unmatchedCount).toBe(2); // Bob (only-pre) + Charlie (only-post)
+
+    // Check Alice (matched)
+    const aliceMatch = data.participants.find((p: any) => p.participantCode === 'EMP-01');
+    expect(aliceMatch.matched).toBe(true);
+    expect(aliceMatch.preScore).toBe(100);
+    expect(aliceMatch.postScore).toBe(100);
+    expect(aliceMatch.delta).toBe(0);
+
+    // Check Bob (only-pre)
+    const bobMatch = data.participants.find((p: any) => p.participantCode === 'EMP-02');
+    expect(bobMatch.matched).toBe(false);
+    expect(bobMatch.preScore).toBe(75);
+    expect(bobMatch.postScore).toBeNull();
+    expect(bobMatch.delta).toBeNull();
+
+    // Check Charlie (only-post)
+    const charlieMatch = data.participants.find((p: any) => p.participantCode === 'EMP-03');
+    expect(charlieMatch.matched).toBe(false);
+    expect(charlieMatch.preScore).toBeNull();
+    expect(charlieMatch.postScore).toBe(100);
+    expect(charlieMatch.delta).toBeNull();
   });
 });

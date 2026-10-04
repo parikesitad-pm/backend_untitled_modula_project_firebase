@@ -3,6 +3,7 @@ import { registry } from './registry';
 
 // Import all docs registrations
 import './docs/auth.docs';
+import './docs/operators.docs';
 import './docs/activities.docs';
 import './docs/questions.docs';
 import './docs/participants.docs';
@@ -17,7 +18,7 @@ export function getOpenApiDocument() {
     openapi: '3.1.0',
     info: {
       title: 'MODULA Activity Backend API',
-      version: '1.0.0',
+      version: '0.2.0',
       description:
         'Neutral Activity Backend supporting Builder, Participant Area, Realtime Leaderboard, and Stats / Results.',
       contact: {

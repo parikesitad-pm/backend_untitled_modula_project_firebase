@@ -2,11 +2,7 @@ import { z } from 'zod';
 
 export const LeaderboardEntrySchema = z.object({
   rank: z.number().int().positive(),
-  attemptId: z.string(),
-  participantId: z.string(),
-  participantName: z.string(),
-  participantCode: z.string(),
-  division: z.string().nullable().optional(),
+  displayName: z.string(),
   finalScore: z.number(),
   leaderboardPoints: z.number(),
   durationMs: z.number(),

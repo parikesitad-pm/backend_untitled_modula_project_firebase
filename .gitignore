@@ -23,6 +23,7 @@ firestore-debug.log*
 # Testing & coverage
 coverage/
 .nyc_output/
+.vite/
 
 # OS / Editor
 .DS_Store

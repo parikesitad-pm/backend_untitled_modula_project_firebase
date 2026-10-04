@@ -14,8 +14,10 @@ export class StatsController {
 
   async getParticipants(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const participants = await statsService.getActivityParticipants(req.params.id);
-      sendSuccess(res, participants);
+      const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 50;
+      const cursor = req.query.cursor ? String(req.query.cursor) : undefined;
+      const result = await statsService.getActivityParticipants(req.params.id, limit, cursor);
+      sendSuccess(res, result.items, undefined, 200, result.meta);
     } catch (err) {
       next(err);
     }
@@ -23,8 +25,10 @@ export class StatsController {
 
   async getResponses(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const responses = await statsService.getActivityResponses(req.params.id);
-      sendSuccess(res, responses);
+      const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 50;
+      const cursor = req.query.cursor ? String(req.query.cursor) : undefined;
+      const result = await statsService.getActivityResponses(req.params.id, limit, cursor);
+      sendSuccess(res, result.items, undefined, 200, result.meta);
     } catch (err) {
       next(err);
     }

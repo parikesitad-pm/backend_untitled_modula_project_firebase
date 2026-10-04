@@ -10,6 +10,7 @@ import { attemptsRoutes } from './modules/attempts/attempts.routes';
 import { leaderboardRoutes } from './modules/leaderboard/leaderboard.routes';
 import { statsRoutes } from './modules/stats/stats.routes';
 import { storageRoutes } from './modules/storage/storage.routes';
+import { operatorsRoutes } from './modules/auth/operators.routes';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 
 export function createApp(): Express {
@@ -34,6 +35,7 @@ export function createApp(): Express {
   apiRouter.use('/attempts', attemptsRoutes);
   apiRouter.use('/leaderboards', leaderboardRoutes);
   apiRouter.use('/storage', storageRoutes);
+  apiRouter.use('/operators', operatorsRoutes);
   apiRouter.use('/', statsRoutes);
 
   // Mount router under both /api and root for Cloud Function compatibility

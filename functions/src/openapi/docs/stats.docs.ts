@@ -29,9 +29,23 @@ registry.registerPath({
   security: [{ BearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
+    query: z.object({
+      limit: z.string().optional().openapi({ example: '50', description: 'Page size (1-200, default 50)' }),
+      cursor: z.string().optional().openapi({ description: 'Next cursor ID from previous page meta' }),
+    }),
   },
   responses: {
-    200: jsonResponse(z.object({ success: z.literal(true), data: z.array(z.record(z.unknown())) }), 'Raw responses'),
+    200: jsonResponse(
+      z.object({
+        success: z.literal(true),
+        data: z.array(z.record(z.unknown())),
+        meta: z.object({
+          limit: z.number(),
+          nextCursor: z.string().nullable(),
+        }).optional(),
+      }),
+      'Raw responses'
+    ),
     404: jsonResponse(ErrorResponseSchema, 'Activity not found'),
   },
 });

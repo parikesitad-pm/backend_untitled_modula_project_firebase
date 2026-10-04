@@ -4,6 +4,7 @@ import { questionsService } from '../questions/questions.service';
 import { attemptsService } from '../attempts/attempts.service';
 import { sendSuccess, sendCreated } from '../../lib/response';
 import { BadRequestError } from '../../lib/errors';
+import { getClock } from '../../lib/clock';
 
 export class PublicController {
   async getActivity(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -13,7 +14,7 @@ export class PublicController {
         throw new BadRequestError('Activity is not published', 'ACTIVITY_NOT_PUBLISHED');
       }
 
-      const now = Date.now();
+      const now = getClock().now().getTime();
       const opens = new Date(activity.opensAt).getTime();
       const closes = new Date(activity.closesAt).getTime();
 
