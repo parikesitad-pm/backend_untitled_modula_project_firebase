@@ -1,5 +1,7 @@
 {
   "projects": {
-    "default": "modula-backend-dev"
-  }
+    "default": "untitled-modula-backend"
+  },
+  "targets": {},
+  "etags": {}
 }
