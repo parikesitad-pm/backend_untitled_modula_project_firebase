@@ -1,0 +1,33 @@
+# Node & dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Functions build output
+functions/lib/
+functions/node_modules/
+
+# Firebase emulators & cache
+.firebase/
+*-debug.log*
+ui-debug.log*
+firebase-debug.log*
+firestore-debug.log*
+
+# Environment & secrets
+.env
+.env.local
+*.local.env
+
+# Testing & coverage
+coverage/
+.nyc_output/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

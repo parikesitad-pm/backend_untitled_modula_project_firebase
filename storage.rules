@@ -1,0 +1,32 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    function isOperator() {
+      return request.auth != null && 
+        request.auth.token.role in ['operator', 'manager', 'owner', 'crown'];
+    }
+
+    function isValidImage() {
+      return request.resource.contentType.matches('image/(jpeg|png|webp)')
+        && request.resource.size < 5 * 1024 * 1024;
+    }
+
+    // Question assets
+    match /activities/{activityId}/questions/{allPaths=**} {
+      // Public can read question images, operators can upload valid images
+      allow read: if true;
+      allow write: if isOperator() && isValidImage();
+    }
+
+    // General operator uploads
+    match /uploads/{operatorId}/{allPaths=**} {
+      allow read, write: if isOperator() && request.auth.uid == operatorId && isValidImage();
+    }
+
+    // Default deny
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

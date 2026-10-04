@@ -1,0 +1,63 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    function isOperator() {
+      return request.auth != null && 
+        request.auth.token.role in ['operator', 'manager', 'owner', 'crown'];
+    }
+
+    // Operators: server-only via Admin SDK
+    match /operators/{operatorId} {
+      allow read, write: if false;
+    }
+
+    // Activities: public read if published; write only for operators
+    match /activities/{activityId} {
+      allow read: if isOperator() || (resource.data.status == 'published');
+      allow write: if isOperator();
+    }
+
+    // Questions & Choices: privileged to prevent answer leakage
+    match /questions/{questionId} {
+      allow read, write: if isOperator();
+    }
+
+    match /choices/{choiceId} {
+      allow read, write: if isOperator();
+    }
+
+    // Participants, Attempts, Answers: managed via Cloud Functions
+    match /participants/{participantId} {
+      allow read: if isOperator();
+      allow write: if false;
+    }
+
+    match /attempts/{attemptId} {
+      allow read: if isOperator();
+      allow write: if false;
+    }
+
+    match /answers/{answerId} {
+      allow read: if isOperator();
+      allow write: if false;
+    }
+
+    // Leaderboard snapshots: public read, server-only write
+    match /leaderboardSnapshots/{snapshotId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Stats snapshots: operator-only read, server-only write
+    match /statsSnapshots/{snapshotId} {
+      allow read: if isOperator();
+      allow write: if false;
+    }
+
+    // Default deny all other paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
