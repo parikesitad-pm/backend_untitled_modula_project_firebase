@@ -18,6 +18,7 @@ const QuestionWithChoicesSchema = z.object({
   speedBonusPercent: z.number(),
   timeReferenceSeconds: z.number(),
   imagePath: z.string().nullable().optional(),
+  comparisonKey: z.string().nullable().optional(),
   choices: z.array(
     z.object({
       id: z.string(),

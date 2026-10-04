@@ -33,6 +33,16 @@
         { "fieldPath": "groupId", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "entries",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "leaderboardPoints", "order": "DESCENDING" },
+        { "fieldPath": "scorePercent", "order": "DESCENDING" },
+        { "fieldPath": "durationMs", "order": "ASCENDING" },
+        { "fieldPath": "rankTimeAt", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { activitiesService } from './activities.service';
+import { leaderboardService } from '../leaderboard/leaderboard.service';
 import { sendSuccess, sendCreated } from '../../lib/response';
 
 export class ActivitiesController {
@@ -63,6 +64,7 @@ export class ActivitiesController {
   async close(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const closed = await activitiesService.close(req.params.id);
+      await leaderboardService.finalizeActivity(req.params.id);
       sendSuccess(res, closed, 'Activity closed successfully');
     } catch (err) {
       next(err);

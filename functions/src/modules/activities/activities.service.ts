@@ -16,6 +16,7 @@ export class ActivitiesService {
   private questionsCol = db.collection('questions');
   private choicesCol = db.collection('choices');
   private attemptsCol = db.collection('attempts');
+  private phasesCol = db.collection('activityGroupPhases');
 
   async assertUniqueSlug(slug: string, excludeId?: string): Promise<void> {
     const snap = await this.col.where('slug', '==', slug).limit(1).get();
@@ -24,8 +25,28 @@ export class ActivitiesService {
     }
   }
 
+  isEffectiveClosed(activity: ActivityDocument): boolean {
+    if (activity.status === 'closed' || activity.status === 'archived') {
+      return true;
+    }
+    const now = getClock().now().getTime();
+    const closesAtMs = new Date(activity.closesAt).getTime();
+    const graceMs = (activity.settings?.finishGraceSeconds ?? 120) * 1000;
+    return now > closesAtMs + graceMs;
+  }
+
   async create(input: CreateActivityInput, createdBy: string): Promise<ActivityDocument> {
     await this.assertUniqueSlug(input.slug);
+
+    if (input.phase === 'pre' || input.phase === 'post') {
+      if (!input.groupId) {
+        throw new BadRequestError('Linked pre/post activities require a groupId', 'GROUP_ID_REQUIRED');
+      }
+    }
+    if (input.groupId && (!input.phase || input.phase === 'standalone')) {
+      throw new BadRequestError('Group activity requires pre or post phase', 'PHASE_REQUIRED');
+    }
+
     const now = getClock().nowIso();
     const docRef = this.col.doc();
 
@@ -37,6 +58,27 @@ export class ActivitiesService {
       createdAt: now,
       updatedAt: now,
     };
+
+    if (input.groupId && (input.phase === 'pre' || input.phase === 'post')) {
+      const resRef = this.phasesCol.doc(`${input.groupId}_${input.phase}`);
+      await db.runTransaction(async (t) => {
+        const existingRes = await t.get(resRef);
+        if (existingRes.exists && existingRes.data()?.activityId !== docRef.id) {
+          throw new ConflictError(
+            `A '${input.phase}' activity already exists for group '${input.groupId}'`,
+            'DUPLICATE_GROUP_PHASE'
+          );
+        }
+        t.set(resRef, {
+          groupId: input.groupId,
+          phase: input.phase,
+          activityId: docRef.id,
+          createdAt: now,
+        });
+        t.set(docRef, activity);
+      });
+      return activity;
+    }
 
     await docRef.set(activity);
     return activity;
@@ -112,6 +154,15 @@ export class ActivitiesService {
       if (input.groupId && input.groupId !== current.groupId) {
         throw new ConflictError('Cannot change groupId of published activity or activity with attempts', 'IMMUTABLE_FIELD');
       }
+      if (current.phase === 'pre' || current.phase === 'post') {
+        const codeField = input.participantFields?.find((f) => f.key === 'participantCode');
+        if (codeField && !codeField.required) {
+          throw new ConflictError(
+            'Cannot make participantCode optional for published pre/post activity',
+            'IMMUTABLE_FIELD'
+          );
+        }
+      }
     }
 
     if (input.slug && input.slug !== current.slug) {
@@ -144,6 +195,10 @@ export class ActivitiesService {
       cSnap.docs.forEach((c) => batch.delete(c.ref));
       batch.delete(qDoc.ref);
     }
+    if (activity.groupId && (activity.phase === 'pre' || activity.phase === 'post')) {
+      const resRef = this.phasesCol.doc(`${activity.groupId}_${activity.phase}`);
+      batch.delete(resRef);
+    }
     batch.delete(this.col.doc(id));
     await batch.commit();
   }
@@ -165,6 +220,38 @@ export class ActivitiesService {
     const now = getClock().now().getTime();
     if (new Date(activity.closesAt).getTime() <= now) {
       throw new BadRequestError('Cannot publish an activity whose closing time has already passed');
+    }
+
+    if (activity.phase === 'pre' || activity.phase === 'post') {
+      if (!activity.groupId) {
+        throw new BadRequestError('Linked pre/post activities require a groupId', 'GROUP_ID_REQUIRED');
+      }
+      const codeField = (activity.participantFields || []).find((f: any) => f.key === 'participantCode');
+      const requiresCode = codeField?.required === true;
+      if (!requiresCode) {
+        throw new BadRequestError(
+          'Participant code is required for linked pre/post activities',
+          'PARTICIPANT_CODE_REQUIRED_FOR_LINKED_ACTIVITY'
+        );
+      }
+      const resRef = this.phasesCol.doc(`${activity.groupId}_${activity.phase}`);
+      await db.runTransaction(async (t) => {
+        const existingRes = await t.get(resRef);
+        if (existingRes.exists && existingRes.data()?.activityId !== activity.id) {
+          throw new ConflictError(
+            `A '${activity.phase}' activity already exists for group '${activity.groupId}'`,
+            'DUPLICATE_GROUP_PHASE'
+          );
+        }
+        t.set(resRef, {
+          groupId: activity.groupId,
+          phase: activity.phase,
+          activityId: activity.id,
+          publishedAt: getClock().nowIso(),
+        });
+        t.update(this.col.doc(id), { status: 'published', updatedAt: getClock().nowIso() });
+      });
+      return this.getById(id);
     }
 
     const updatedAt = getClock().nowIso();

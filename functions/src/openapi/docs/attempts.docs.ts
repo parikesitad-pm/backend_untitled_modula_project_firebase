@@ -4,6 +4,40 @@ import { SubmitAnswerSchema } from '../../modules/attempts/attempts.schema';
 
 registry.registerPath({
   method: 'post',
+  path: '/api/attempts/{attemptId}/questions/{questionId}/enter',
+  tags: ['Attempts'],
+  summary: 'Reveal question from attempt snapshot and start/record official timer marker',
+  security: [{ AttemptTokenAuth: [] }],
+  request: {
+    params: z.object({ attemptId: z.string(), questionId: z.string() }),
+  },
+  responses: {
+    200: jsonResponse(
+      z.object({
+        success: z.literal(true),
+        data: z.object({
+          question: z.object({
+            id: z.string(),
+            position: z.number(),
+            body: z.string(),
+            bodyText: z.string().optional(),
+            type: z.string(),
+            imagePath: z.string().nullable().optional(),
+            comparisonKey: z.string().nullable().optional(),
+            choices: z.array(z.object({ id: z.string(), body: z.string(), position: z.number() })),
+          }),
+        }),
+      }),
+      'Sanitized question revealed and enter timer recorded'
+    ),
+    400: jsonResponse(ErrorResponseSchema, 'Attempt not in progress or question not found in snapshot'),
+    401: jsonResponse(ErrorResponseSchema, 'Invalid or missing X-Attempt-Token'),
+    404: jsonResponse(ErrorResponseSchema, 'Attempt not found'),
+  },
+});
+
+registry.registerPath({
+  method: 'post',
   path: '/api/attempts/{attemptId}/answers',
   tags: ['Attempts'],
   summary: 'Submit answer for a question in an active attempt',

@@ -19,6 +19,8 @@ export const ActivitySettingsSchema = z.object({
   allowMultipleAttempts: z.boolean().default(false),
   speedBonusCapPercent: z.number().min(0).max(100).default(20),
   hideLeaderboardFromParticipants: z.boolean().default(false),
+  appearance: z.record(z.unknown()).optional(),
+  music: z.record(z.unknown()).optional(),
 });
 
 export const CreateActivitySchema = z

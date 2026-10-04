@@ -11,6 +11,7 @@ export class StatsService {
   private answersCol = db.collection('answers');
   private participantsCol = db.collection('participants');
   private snapshotsCol = db.collection('statsSnapshots');
+  private attemptSnapshotsCol = db.collection('attemptSnapshots');
 
   async getActivityStats(activityId: string): Promise<ActivityStatsSummary> {
     await activitiesService.getById(activityId);
@@ -147,6 +148,12 @@ export class StatsService {
     const answersSnap = await this.answersCol.where('activityId', '==', activityId).get();
     const answers = answersSnap.docs.map((d) => d.data());
 
+    // Check attempt snapshots to compute textVariants
+    const attemptsSnap = await this.attemptsCol.where('activityId', '==', activityId).get();
+    const snapshotDocs = await Promise.all(
+      attemptsSnap.docs.map((d) => this.attemptSnapshotsCol.doc(d.id).get())
+    );
+
     return questions.map((q) => {
       const qAnswers = answers.filter((a) => a.questionId === q.id);
       const totalAnswers = qAnswers.length;
@@ -154,6 +161,19 @@ export class StatsService {
       const correctPercentage = totalAnswers > 0 ? Number(((correctAnswers / totalAnswers) * 100).toFixed(2)) : 0;
       const totalDuration = qAnswers.reduce((sum, a) => sum + (Number(a.durationMs) || 0), 0);
       const averageDurationMs = totalAnswers > 0 ? Math.round(totalDuration / totalAnswers) : 0;
+
+      const bodyVariants = new Set<string>();
+      bodyVariants.add(q.body);
+
+      snapshotDocs.forEach((sDoc) => {
+        if (sDoc.exists) {
+          const sQuestions = sDoc.data()?.questions || [];
+          const matchedQ = sQuestions.find((sq: any) => sq.questionId === q.id);
+          if (matchedQ?.body) {
+            bodyVariants.add(matchedQ.body);
+          }
+        }
+      });
 
       return {
         questionId: q.id,
@@ -163,6 +183,8 @@ export class StatsService {
         correctAnswers,
         correctPercentage,
         averageDurationMs,
+        textVariants: bodyVariants.size,
+        comparisonKey: q.comparisonKey || null,
       };
     });
   }
@@ -242,24 +264,143 @@ export class StatsService {
     });
 
     const matchedAverageDelta = matchedCount > 0 ? Number((matchedDeltaSum / matchedCount).toFixed(2)) : 0;
-    const [preQStats, postQStats] = await Promise.all([
-      pre ? this.getQuestionStats(pre.id) : [],
-      post ? this.getQuestionStats(post.id) : [],
+
+    // Pre/Post Question Delta pairing using snapshotted comparisonKey (Requirement K2)
+    const [preAnswersSnap, postAnswersSnap] = await Promise.all([
+      pre ? this.answersCol.where('activityId', '==', pre.id).get() : { docs: [] },
+      post ? this.answersCol.where('activityId', '==', post.id).get() : { docs: [] },
     ]);
 
-    const maxLen = Math.max(preQStats.length, postQStats.length);
-    const questionStatsDelta = [];
-    for (let i = 0; i < maxLen; i++) {
-      const preQ = preQStats[i];
-      const postQ = postQStats[i];
-      const prePct = preQ ? preQ.correctPercentage : 0;
-      const postPct = postQ ? postQ.correctPercentage : 0;
-      questionStatsDelta.push({
-        questionIndex: i,
-        preCorrectPercentage: prePct,
-        postCorrectPercentage: postPct,
-        delta: Number((postPct - prePct).toFixed(2)),
+    // Build question answer stats keyed by attempt's snapshot question comparisonKey
+    const preSnapshotDocs = await Promise.all(
+      preAttempts.docs.map((d) => this.attemptSnapshotsCol.doc(d.id).get())
+    );
+    const postSnapshotDocs = await Promise.all(
+      postAttempts.docs.map((d) => this.attemptSnapshotsCol.doc(d.id).get())
+    );
+
+    // Map attemptId_questionId -> snapshotted comparisonKey
+    const preKeyByAttemptQuestion = new Map<string, string>();
+    preSnapshotDocs.forEach((sDoc) => {
+      if (sDoc.exists) {
+        const questions = sDoc.data()?.questions || [];
+        questions.forEach((q: any) => {
+          if (q.comparisonKey) {
+            preKeyByAttemptQuestion.set(`${sDoc.id}_${q.questionId}`, q.comparisonKey);
+          }
+        });
+      }
+    });
+
+    const postKeyByAttemptQuestion = new Map<string, string>();
+    postSnapshotDocs.forEach((sDoc) => {
+      if (sDoc.exists) {
+        const questions = sDoc.data()?.questions || [];
+        questions.forEach((q: any) => {
+          if (q.comparisonKey) {
+            postKeyByAttemptQuestion.set(`${sDoc.id}_${q.questionId}`, q.comparisonKey);
+          }
+        });
+      }
+    });
+
+    // Check if comparisonKeys exist in snapshots or live questions
+    const preQuestions = pre ? await questionsService.getByActivityId(pre.id, false) : [];
+    const postQuestions = post ? await questionsService.getByActivityId(post.id, false) : [];
+
+    const hasComparisonKeys =
+      preKeyByAttemptQuestion.size > 0 ||
+      postKeyByAttemptQuestion.size > 0 ||
+      preQuestions.some((q) => !!q.comparisonKey) ||
+      postQuestions.some((q) => !!q.comparisonKey);
+
+    const questionStatsDelta: any[] = [];
+
+    if (hasComparisonKeys) {
+      // Gather all distinct comparisonKeys from pre and post
+      const allKeys = new Set<string>();
+      preQuestions.forEach((q) => { if (q.comparisonKey) allKeys.add(q.comparisonKey); });
+      postQuestions.forEach((q) => { if (q.comparisonKey) allKeys.add(q.comparisonKey); });
+      preKeyByAttemptQuestion.forEach((k) => allKeys.add(k));
+      postKeyByAttemptQuestion.forEach((k) => allKeys.add(k));
+
+      // Calculate stats per key
+      const preCountsByKey = new Map<string, { total: number; correct: number }>();
+      preAnswersSnap.docs.forEach((d) => {
+        const a = d.data();
+        const key = preKeyByAttemptQuestion.get(`${a.attemptId}_${a.questionId}`) ||
+          preQuestions.find((q) => q.id === a.questionId)?.comparisonKey;
+        if (key) {
+          const cur = preCountsByKey.get(key) || { total: 0, correct: 0 };
+          cur.total++;
+          if (a.isCorrect) cur.correct++;
+          preCountsByKey.set(key, cur);
+        }
       });
+
+      const postCountsByKey = new Map<string, { total: number; correct: number }>();
+      postAnswersSnap.docs.forEach((d) => {
+        const a = d.data();
+        const key = postKeyByAttemptQuestion.get(`${a.attemptId}_${a.questionId}`) ||
+          postQuestions.find((q) => q.id === a.questionId)?.comparisonKey;
+        if (key) {
+          const cur = postCountsByKey.get(key) || { total: 0, correct: 0 };
+          cur.total++;
+          if (a.isCorrect) cur.correct++;
+          postCountsByKey.set(key, cur);
+        }
+      });
+
+      let idx = 0;
+      allKeys.forEach((key) => {
+        const preData = preCountsByKey.get(key);
+        const postData = postCountsByKey.get(key);
+        const inPre = preData !== undefined || preQuestions.some((q) => q.comparisonKey === key);
+        const inPost = postData !== undefined || postQuestions.some((q) => q.comparisonKey === key);
+        const matched = inPre && inPost;
+
+        const prePct = preData && preData.total > 0
+          ? Number(((preData.correct / preData.total) * 100).toFixed(2))
+          : (inPre ? 0 : null);
+        const postPct = postData && postData.total > 0
+          ? Number(((postData.correct / postData.total) * 100).toFixed(2))
+          : (inPost ? 0 : null);
+
+        const delta = matched && prePct !== null && postPct !== null
+          ? Number((postPct - prePct).toFixed(2))
+          : null;
+
+        questionStatsDelta.push({
+          questionIndex: idx++,
+          comparisonKey: key,
+          preCorrectPercentage: prePct,
+          postCorrectPercentage: postPct,
+          delta,
+          matched,
+        });
+      });
+    } else {
+      // Fallback: match by questionIndex
+      const [preQStats, postQStats] = await Promise.all([
+        pre ? this.getQuestionStats(pre.id) : [],
+        post ? this.getQuestionStats(post.id) : [],
+      ]);
+
+      const maxLen = Math.max(preQStats.length, postQStats.length);
+      for (let i = 0; i < maxLen; i++) {
+        const preQ = preQStats[i];
+        const postQ = postQStats[i];
+        const prePct = preQ ? preQ.correctPercentage : 0;
+        const postPct = postQ ? postQ.correctPercentage : 0;
+        questionStatsDelta.push({
+          questionIndex: i,
+          comparisonKey: null,
+          preCorrectPercentage: prePct,
+          postCorrectPercentage: postPct,
+          delta: Number((postPct - prePct).toFixed(2)),
+          matched: !!(preQ && postQ),
+        });
+      }
     }
 
     return {

@@ -29,6 +29,8 @@ export const QuestionStatSchema = z.object({
   correctAnswers: z.number().int().min(0),
   correctPercentage: z.number().min(0).max(100),
   averageDurationMs: z.number().min(0),
+  textVariants: z.number().int().min(1).optional(),
+  comparisonKey: z.string().nullable().optional(),
 });
 
 export type QuestionStat = z.infer<typeof QuestionStatSchema>;
@@ -57,10 +59,12 @@ export const PrePostComparisonSchema = z.object({
   participants: z.array(PrePostParticipantComparisonSchema),
   questionStatsDelta: z.array(
     z.object({
-      questionIndex: z.number().int().min(0),
-      preCorrectPercentage: z.number(),
-      postCorrectPercentage: z.number(),
-      delta: z.number(),
+      questionIndex: z.number().int().min(0).optional(),
+      comparisonKey: z.string().nullable().optional(),
+      preCorrectPercentage: z.number().nullable(),
+      postCorrectPercentage: z.number().nullable(),
+      delta: z.number().nullable(),
+      matched: z.boolean().optional(),
     })
   ),
 });

@@ -47,6 +47,16 @@ export class AttemptsController {
       next(err);
     }
   }
+
+  async enterQuestion(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const token = this.getAttemptToken(req);
+      const result = await attemptsService.enterQuestion(req.params.attemptId, req.params.questionId, token);
+      sendSuccess(res, result, 'Question revealed successfully');
+    } catch (err) {
+      next(err);
+    }
+  }
 }
 
 export const attemptsController = new AttemptsController();

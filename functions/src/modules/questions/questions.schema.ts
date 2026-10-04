@@ -42,6 +42,7 @@ export const CreateQuestionSchema = z
     speedBonusPercent: z.number().min(0).max(100).default(env.DEFAULT_SPEED_BONUS_CAP_PERCENT),
     timeReferenceSeconds: z.number().positive().default(env.DEFAULT_TIME_REFERENCE_SECONDS),
     imagePath: z.string().optional().nullable(),
+    comparisonKey: z.string().max(100).optional().nullable(),
     choices: z.array(ChoiceInputSchema).min(2, 'At least 2 choices are required'),
   })
   .superRefine((data, ctx) => {
@@ -67,6 +68,7 @@ export const UpdateQuestionSchema = z
     speedBonusPercent: z.number().min(0).max(100).optional(),
     timeReferenceSeconds: z.number().positive().optional(),
     imagePath: z.string().optional().nullable(),
+    comparisonKey: z.string().max(100).optional().nullable(),
     choices: z.array(ChoiceInputSchema).min(2).optional(),
   })
   .superRefine((data, ctx) => {

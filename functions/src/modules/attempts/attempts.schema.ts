@@ -12,3 +12,22 @@ export const SubmitAnswerSchema = z.object({
 export type SubmitAnswerInput = z.infer<typeof SubmitAnswerSchema>;
 
 export const FinishAttemptSchema = z.object({}).optional();
+
+export const SanitizedChoiceSchema = z.object({
+  id: z.string(),
+  body: z.string(),
+  position: z.number().int(),
+});
+
+export const SanitizedQuestionSchema = z.object({
+  id: z.string(),
+  position: z.number().int(),
+  body: z.string(),
+  bodyText: z.string().optional(),
+  type: z.string(),
+  imagePath: z.string().nullable().optional(),
+  comparisonKey: z.string().nullable().optional(),
+  choices: z.array(SanitizedChoiceSchema),
+});
+
+export type SanitizedQuestion = z.infer<typeof SanitizedQuestionSchema>;

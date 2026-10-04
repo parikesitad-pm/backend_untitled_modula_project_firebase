@@ -25,8 +25,30 @@ export class PublicController {
         throw new BadRequestError('Activity has closed', 'ACTIVITY_CLOSED');
       }
 
-      const questions = await questionsService.getByActivityId(activity.id, true);
-      sendSuccess(res, { activity, questions });
+      const questions = await questionsService.getByActivityId(activity.id, false);
+      const questionCount = questions.length;
+
+      const { id, title, description, mode, slug, phase, groupId, opensAt, closesAt, participantFields, settings } = activity;
+      const safeActivity = {
+        id,
+        title,
+        description,
+        mode,
+        slug,
+        phase: phase || 'standalone',
+        groupId: groupId || null,
+        opensAt,
+        closesAt,
+        participantFields: participantFields || {},
+        settings: {
+          appearance: settings?.appearance,
+          music: settings?.music,
+          hideLeaderboardFromParticipants: !!settings?.hideLeaderboardFromParticipants,
+          maxAttempts: settings?.maxAttempts ?? 1,
+        },
+      };
+
+      sendSuccess(res, { activity: safeActivity, questionCount });
     } catch (err) {
       next(err);
     }

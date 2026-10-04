@@ -165,24 +165,28 @@ export function calculateAttemptScores(
 
 export interface LeaderboardRankable {
   attemptId: string;
-  finalScore: number;
   leaderboardPoints: number;
+  scorePercent?: number;
+  finalScore?: number;
   durationMs: number;
-  completedAt: string | number | Date;
+  rankTimeAt?: string | number | Date | null;
+  completedAt?: string | number | Date | null;
 }
 
 export function compareLeaderboardEntries(a: LeaderboardRankable, b: LeaderboardRankable): number {
   if (b.leaderboardPoints !== a.leaderboardPoints) {
     return b.leaderboardPoints - a.leaderboardPoints;
   }
-  if (b.finalScore !== a.finalScore) {
-    return b.finalScore - a.finalScore;
+  const scoreA = a.scorePercent ?? a.finalScore ?? 0;
+  const scoreB = b.scorePercent ?? b.finalScore ?? 0;
+  if (scoreB !== scoreA) {
+    return scoreB - scoreA;
   }
   if (a.durationMs !== b.durationMs) {
     return a.durationMs - b.durationMs;
   }
-  const timeA = new Date(a.completedAt).getTime();
-  const timeB = new Date(b.completedAt).getTime();
+  const timeA = new Date(a.rankTimeAt || a.completedAt || 0).getTime();
+  const timeB = new Date(b.rankTimeAt || b.completedAt || 0).getTime();
   if (timeA !== timeB) {
     return timeA - timeB;
   }

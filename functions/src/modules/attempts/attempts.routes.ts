@@ -9,6 +9,10 @@ router.post('/:attemptId/answers', validateBody(SubmitAnswerSchema), (req, res, 
   attemptsController.submitAnswer(req, res, next);
 });
 
+router.post('/:attemptId/questions/:questionId/enter', (req, res, next) => {
+  attemptsController.enterQuestion(req, res, next);
+});
+
 router.post('/:attemptId/finish', (req, res, next) => {
   attemptsController.finish(req, res, next);
 });

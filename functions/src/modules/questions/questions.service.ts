@@ -25,6 +25,7 @@ export interface QuestionWithChoices {
   timeReferenceSeconds: number;
   imagePath?: string | null;
   imageUrl?: string | null;
+  comparisonKey?: string | null;
   createdAt: string;
   updatedAt: string;
   choices: ChoiceDocument[];
@@ -57,6 +58,20 @@ export class QuestionsService {
   }
 
   async create(activityId: string, input: CreateQuestionInput): Promise<QuestionWithChoices> {
+    if (input.comparisonKey) {
+      const existing = await this.questionsCol
+        .where('activityId', '==', activityId)
+        .where('comparisonKey', '==', input.comparisonKey)
+        .limit(1)
+        .get();
+      if (!existing.empty) {
+        throw new ConflictError(
+          `Question with comparisonKey '${input.comparisonKey}' already exists in this activity`,
+          'DUPLICATE_COMPARISON_KEY'
+        );
+      }
+    }
+
     const countSnap = await this.questionsCol.where('activityId', '==', activityId).get();
     const nextPosition = input.position ?? countSnap.size;
     const now = getClock().nowIso();
@@ -74,6 +89,7 @@ export class QuestionsService {
       speedBonusPercent: input.speedBonusPercent,
       timeReferenceSeconds: input.timeReferenceSeconds,
       imagePath: input.imagePath || null,
+      comparisonKey: input.comparisonKey || null,
       createdAt: now,
       updatedAt: now,
     };
@@ -146,6 +162,20 @@ export class QuestionsService {
   async update(id: string, input: UpdateQuestionInput): Promise<QuestionWithChoices> {
     const current = await this.getById(id);
     await this.assertCanModifyQuestion(current.activityId, input);
+
+    if (input.comparisonKey && input.comparisonKey !== current.comparisonKey) {
+      const existing = await this.questionsCol
+        .where('activityId', '==', current.activityId)
+        .where('comparisonKey', '==', input.comparisonKey)
+        .limit(1)
+        .get();
+      if (!existing.empty && existing.docs[0].id !== id) {
+        throw new ConflictError(
+          `Question with comparisonKey '${input.comparisonKey}' already exists in this activity`,
+          'DUPLICATE_COMPARISON_KEY'
+        );
+      }
+    }
 
     const now = getClock().nowIso();
     const { choices, ...qData } = input;

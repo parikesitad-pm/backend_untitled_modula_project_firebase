@@ -4,11 +4,50 @@ import { activitiesService, ActivityDocument } from '../activities/activities.se
 import { questionsService } from '../questions/questions.service';
 import { participantsService, ParticipantDocument } from '../participants/participants.service';
 import { ParticipantInput } from '../participants/participants.schema';
-import { SubmitAnswerInput } from './attempts.schema';
-import { calculateQuestionScore, calculateAttemptScores, ScoringQuestion } from '../../lib/scoring';
+import { SubmitAnswerInput, SanitizedQuestion } from './attempts.schema';
+import { calculateQuestionScore, calculateAttemptScores, ScoringQuestion, calculateFinalScore } from '../../lib/scoring';
 import { generateSecureToken, hashTokenSha256, timingSafeEqualString } from '../../lib/hash';
 import { getClock } from '../../lib/clock';
 import { leaderboardService } from '../leaderboard/leaderboard.service';
+
+export interface SnapshotChoice {
+  id: string;
+  body: string;
+  position: number;
+  isCorrect: boolean;
+}
+
+export interface SnapshotQuestion {
+  questionId: string;
+  position: number;
+  body: string;
+  bodyText: string;
+  type: string;
+  imagePath?: string | null;
+  comparisonKey?: string | null;
+  weight: number;
+  speedBonusEnabled: boolean;
+  speedBonusPercent: number;
+  timeReferenceSeconds: number;
+  correctChoiceIds: string[];
+  choices: SnapshotChoice[];
+}
+
+export interface AttemptSnapshotDocument {
+  attemptId: string;
+  activityId: string;
+  scoringVersion: number;
+  questions: SnapshotQuestion[];
+  snapshotCreatedAt: string;
+}
+
+export interface QuestionStateDocument {
+  attemptId: string;
+  questionId: string;
+  firstEnteredAt: string;
+  lastEnteredAt: string;
+  enterCount: number;
+}
 
 export interface QuestionSnapshot {
   questionId: string;
@@ -25,22 +64,38 @@ export interface AttemptDocument {
   id: string;
   activityId: string;
   participantId: string;
-  status: 'in_progress' | 'completed' | 'abandoned';
+  status: 'in_progress' | 'completed' | 'abandoned' | 'expired';
   startedAt: string;
   completedAt: string | null;
+  lastAnswerAt?: string | null;
   finalScore: number;
   leaderboardPoints: number;
   durationMs: number;
   attemptTokenHash: string;
   scoringVersion: number;
-  questionSnapshots: QuestionSnapshot[];
+  questionSnapshots?: QuestionSnapshot[];
   createdAt: string;
   updatedAt: string;
+}
+
+export function sanitizeSnapshotQuestion(q: SnapshotQuestion): SanitizedQuestion {
+  return {
+    id: q.questionId,
+    position: q.position,
+    body: q.body,
+    bodyText: q.bodyText,
+    type: q.type,
+    imagePath: q.imagePath || null,
+    comparisonKey: q.comparisonKey || null,
+    choices: (q.choices || []).map(({ id, body, position }) => ({ id, body, position })),
+  };
 }
 
 export class AttemptsService {
   private col = db.collection('attempts');
   private answersCol = db.collection('answers');
+  private snapshotsCol = db.collection('attemptSnapshots');
+  private questionStatesCol = db.collection('questionStates');
 
   verifyToken(attempt: AttemptDocument, token?: string, isOperator = false): void {
     if (isOperator) return;
@@ -59,7 +114,7 @@ export class AttemptsService {
     if (now < new Date(activity.opensAt).getTime()) {
       throw new BadRequestError('Activity has not opened yet', 'ACTIVITY_NOT_STARTED');
     }
-    if (now > new Date(activity.closesAt).getTime()) {
+    if (activitiesService.isEffectiveClosed(activity)) {
       throw new BadRequestError('Activity has closed', 'ACTIVITY_CLOSED');
     }
   }
@@ -67,7 +122,12 @@ export class AttemptsService {
   async startAttempt(
     slug: string,
     input: ParticipantInput
-  ): Promise<{ attemptToken: string; attempt: AttemptDocument; participant: ParticipantDocument }> {
+  ): Promise<{
+    attemptToken: string;
+    attempt: any;
+    participant: ParticipantDocument;
+    firstQuestion: SanitizedQuestion;
+  }> {
     const activity = await activitiesService.getBySlug(slug);
     this.assertActivityAccess(activity);
     const participant = await participantsService.findOrCreate(activity.id, input);
@@ -84,8 +144,19 @@ export class AttemptsService {
 
     const rawToken = generateSecureToken(32);
     const attemptTokenHash = hashTokenSha256(rawToken);
-    const questions = await questionsService.getByActivityId(activity.id, false);
-    const questionSnapshots: QuestionSnapshot[] = questions.map((q) => ({
+
+    // Fetch live questions to freeze into attempt snapshot
+    const liveQuestions = await questionsService.getByActivityId(activity.id, false);
+    if (liveQuestions.length === 0) {
+      throw new BadRequestError('Activity has no questions');
+    }
+
+    const now = getClock().nowIso();
+    const docRef = this.col.doc();
+    const attemptId = docRef.id;
+
+    // Build QuestionSnapshots
+    const legacySnapshots: QuestionSnapshot[] = liveQuestions.map((q) => ({
       questionId: q.id,
       weight: q.weight,
       type: q.type,
@@ -96,27 +167,132 @@ export class AttemptsService {
       choiceIds: q.choices.map((c) => c.id),
     }));
 
-    const now = getClock().nowIso();
-    const docRef = this.col.doc();
+    // Build AttemptSnapshotDocument
+    const snapshotQuestions: SnapshotQuestion[] = liveQuestions.map((q) => ({
+      questionId: q.id,
+      position: q.position,
+      body: q.body,
+      bodyText: q.body,
+      type: q.type,
+      imagePath: q.imagePath || null,
+      comparisonKey: q.comparisonKey || null,
+      weight: q.weight,
+      speedBonusEnabled: q.speedBonusEnabled,
+      speedBonusPercent: q.speedBonusPercent,
+      timeReferenceSeconds: q.timeReferenceSeconds,
+      correctChoiceIds: q.choices.filter((c) => c.isCorrect).map((c) => c.id),
+      choices: q.choices.map((c) => ({
+        id: c.id,
+        body: c.body,
+        position: c.position,
+        isCorrect: !!c.isCorrect,
+      })),
+    }));
+
     const attempt: AttemptDocument = {
-      id: docRef.id,
+      id: attemptId,
       activityId: activity.id,
       participantId: participant.id,
       status: 'in_progress',
       startedAt: now,
       completedAt: null,
+      lastAnswerAt: null,
       finalScore: 0,
       leaderboardPoints: 0,
       durationMs: 0,
       attemptTokenHash,
-      scoringVersion: 1,
-      questionSnapshots,
+      scoringVersion: 2,
+      questionSnapshots: legacySnapshots,
       createdAt: now,
       updatedAt: now,
     };
 
-    await docRef.set(attempt);
-    return { attemptToken: rawToken, attempt: sanitizeAttempt(attempt), participant };
+    const attemptSnapshot: AttemptSnapshotDocument = {
+      attemptId,
+      activityId: activity.id,
+      scoringVersion: 2,
+      questions: snapshotQuestions,
+      snapshotCreatedAt: now,
+    };
+
+    // First question marker
+    const firstQ = snapshotQuestions[0];
+    const firstQMarkerRef = this.questionStatesCol.doc(`${attemptId}_${firstQ.questionId}`);
+
+    const batch = db.batch();
+    batch.set(docRef, attempt);
+    batch.set(this.snapshotsCol.doc(attemptId), attemptSnapshot);
+    batch.set(firstQMarkerRef, {
+      attemptId,
+      questionId: firstQ.questionId,
+      firstEnteredAt: now,
+      lastEnteredAt: now,
+      enterCount: 1,
+    });
+
+    await batch.commit();
+
+    return {
+      attemptToken: rawToken,
+      attempt: sanitizeAttempt(attempt),
+      participant,
+      firstQuestion: sanitizeSnapshotQuestion(firstQ),
+    };
+  }
+
+  async enterQuestion(
+    attemptId: string,
+    questionId: string,
+    token?: string
+  ): Promise<{ question: SanitizedQuestion }> {
+    const attemptDoc = await this.col.doc(attemptId).get();
+    if (!attemptDoc.exists) throw new NotFoundError(`Attempt '${attemptId}' not found`);
+    const attempt = attemptDoc.data() as AttemptDocument;
+    this.verifyToken(attempt, token);
+
+    if (attempt.status !== 'in_progress') {
+      throw new BadRequestError('Attempt is not in progress', 'ATTEMPT_NOT_IN_PROGRESS');
+    }
+
+    const activity = await activitiesService.getById(attempt.activityId);
+    if (activitiesService.isEffectiveClosed(activity)) {
+      throw new BadRequestError('Activity has closed', 'ACTIVITY_CLOSED');
+    }
+
+    const snapDoc = await this.snapshotsCol.doc(attemptId).get();
+    if (!snapDoc.exists) {
+      throw new NotFoundError(`Attempt snapshot not found for attempt '${attemptId}'`);
+    }
+
+    const snapshot = snapDoc.data() as AttemptSnapshotDocument;
+    const qSnap = snapshot.questions.find((q) => q.questionId === questionId);
+    if (!qSnap) {
+      throw new BadRequestError('Question not part of this attempt snapshot');
+    }
+
+    const markerRef = this.questionStatesCol.doc(`${attemptId}_${questionId}`);
+    const now = getClock().nowIso();
+
+    await db.runTransaction(async (t) => {
+      const doc = await t.get(markerRef);
+      if (!doc.exists) {
+        t.set(markerRef, {
+          attemptId,
+          questionId,
+          firstEnteredAt: now,
+          lastEnteredAt: now,
+          enterCount: 1,
+        });
+      } else {
+        const count = (doc.data()?.enterCount || 1) + 1;
+        t.update(markerRef, {
+          lastEnteredAt: now,
+          enterCount: count,
+        });
+      }
+    });
+
+    return { question: sanitizeSnapshotQuestion(qSnap) };
   }
 
   async submitAnswer(
@@ -134,8 +310,7 @@ export class AttemptsService {
     }
 
     const activity = await activitiesService.getById(attempt.activityId);
-    const nowMs = getClock().now().getTime();
-    if (nowMs > new Date(activity.closesAt).getTime()) {
+    if (activitiesService.isEffectiveClosed(activity)) {
       throw new BadRequestError('Activity has closed', 'ACTIVITY_CLOSED');
     }
 
@@ -147,11 +322,42 @@ export class AttemptsService {
       throw new ConflictError('Question has already been answered', 'ALREADY_ANSWERED');
     }
 
-    const qSnap = attempt.questionSnapshots.find((q) => q.questionId === input.questionId);
+    // Load question from attempt snapshot
+    const snapDoc = await this.snapshotsCol.doc(attemptId).get();
+    let qSnap: SnapshotQuestion | undefined;
+    let totalQuestionsCount = 0;
+    let totalAvailableWeight = 0;
+
+    if (snapDoc.exists) {
+      const snapData = snapDoc.data() as AttemptSnapshotDocument;
+      qSnap = snapData.questions.find((q) => q.questionId === input.questionId);
+      totalQuestionsCount = snapData.questions.length;
+      totalAvailableWeight = snapData.questions.reduce((sum, q) => sum + (q.weight > 0 ? q.weight : 1), 0);
+    } else if (attempt.questionSnapshots) {
+      const leg = attempt.questionSnapshots.find((q) => q.questionId === input.questionId);
+      if (leg) {
+        qSnap = {
+          questionId: leg.questionId,
+          position: 0,
+          body: '',
+          bodyText: '',
+          type: leg.type,
+          weight: leg.weight,
+          speedBonusEnabled: leg.speedBonusEnabled,
+          speedBonusPercent: leg.speedBonusPercent,
+          timeReferenceSeconds: leg.timeReferenceSeconds,
+          correctChoiceIds: leg.correctChoiceIds,
+          choices: leg.choiceIds.map((id) => ({ id, body: '', position: 0, isCorrect: leg.correctChoiceIds.includes(id) })),
+        };
+      }
+      totalQuestionsCount = attempt.questionSnapshots.length;
+      totalAvailableWeight = attempt.questionSnapshots.reduce((sum, q) => sum + (q.weight > 0 ? q.weight : 1), 0);
+    }
+
     if (!qSnap) throw new BadRequestError('Question not part of this attempt');
 
-    const validChoices = new Set(qSnap.choiceIds);
-    if (!input.selectedChoiceIds.every((id) => validChoices.has(id))) {
+    const validChoiceIds = new Set(qSnap.choices.map((c) => c.id));
+    if (!input.selectedChoiceIds.every((id) => validChoiceIds.has(id))) {
       throw new BadRequestError('Foreign choice id detected');
     }
     if (new Set(input.selectedChoiceIds).size !== input.selectedChoiceIds.length) {
@@ -161,20 +367,33 @@ export class AttemptsService {
       throw new BadRequestError('Single choice question cannot have multiple selections');
     }
 
-    // Server-authoritative duration calculation
-    const allAnswersSnap = await this.answersCol.where('attemptId', '==', attemptId).get();
-    let lastTimeMs = new Date(attempt.startedAt).getTime();
-    allAnswersSnap.docs.forEach((d) => {
-      const serverTime = new Date(d.data().serverReceivedAt).getTime();
-      if (serverTime > lastTimeMs) lastTimeMs = serverTime;
-    });
+    // Server-authoritative timing via questionStates marker
+    const markerDoc = await this.questionStatesCol.doc(`${attemptId}_${input.questionId}`).get();
+    const serverReceivedAt = getClock().nowIso();
+    const nowMs = new Date(serverReceivedAt).getTime();
 
-    const officialDurationMs = Math.max(0, nowMs - lastTimeMs);
+    let officialDurationMs = 0;
+    let timingSource: 'server_marker' | 'missing_marker' = 'server_marker';
+
+    if (markerDoc.exists) {
+      const markerData = markerDoc.data() as QuestionStateDocument;
+      const firstEnteredAtMs = new Date(markerData.firstEnteredAt).getTime();
+      officialDurationMs = Math.max(0, nowMs - firstEnteredAtMs);
+      timingSource = 'server_marker';
+    } else {
+      // Requirement H4: Answer without reveal marker
+      // correctness scored, speed bonus = 0, timingSource = "missing_marker"
+      // Do not synthesize a zero duration
+      const startedAtMs = new Date(attempt.startedAt).getTime();
+      officialDurationMs = Math.max(0, nowMs - startedAtMs);
+      timingSource = 'missing_marker';
+    }
+
     const scored = calculateQuestionScore(
       {
         id: qSnap.questionId,
         weight: qSnap.weight,
-        speedBonusEnabled: qSnap.speedBonusEnabled,
+        speedBonusEnabled: timingSource === 'server_marker' ? qSnap.speedBonusEnabled : false,
         speedBonusPercent: qSnap.speedBonusPercent,
         timeReferenceSeconds: qSnap.timeReferenceSeconds,
         correctChoiceIds: qSnap.correctChoiceIds,
@@ -183,13 +402,17 @@ export class AttemptsService {
         questionId: input.questionId,
         selectedChoiceIds: input.selectedChoiceIds,
         enteredAt: input.enteredAt || attempt.startedAt,
-        answeredAt: input.answeredAt || getClock().nowIso(),
+        answeredAt: input.answeredAt || serverReceivedAt,
         durationMs: officialDurationMs,
       }
     );
 
-    const serverReceivedAt = getClock().nowIso();
-    await answerRef.set({
+    if (timingSource === 'missing_marker') {
+      scored.speedBonus = 0;
+      scored.leaderboardPoints = scored.earnedWeight;
+    }
+
+    const answerData = {
       id: answerId,
       attemptId,
       activityId: attempt.activityId,
@@ -197,26 +420,76 @@ export class AttemptsService {
       selectedChoiceIds: input.selectedChoiceIds,
       isCorrect: scored.isCorrect,
       serverReceivedAt,
-      clientEnteredAt: input.enteredAt,
-      clientAnsweredAt: input.answeredAt,
+      clientEnteredAt: input.enteredAt || null,
+      clientAnsweredAt: input.answeredAt || null,
       durationMs: officialDurationMs,
       earnedWeight: scored.earnedWeight,
       speedBonus: scored.speedBonus,
       leaderboardPoints: scored.leaderboardPoints,
       changeCount: input.changeCount || 0,
+      timingSource,
+    };
+
+    await answerRef.set(answerData);
+
+    // Compute running totals for attempt
+    const answersSnap = await this.answersCol.where('attemptId', '==', attemptId).get();
+    let runningPoints = 0;
+    let runningEarnedWeight = 0;
+    let runningDurationMs = 0;
+
+    answersSnap.docs.forEach((doc) => {
+      const a = doc.data();
+      runningPoints = Number((runningPoints + (Number(a.leaderboardPoints) || 0)).toFixed(2));
+      runningEarnedWeight += Number(a.earnedWeight) || 0;
+      runningDurationMs += Number(a.durationMs) || 0;
     });
+
+    const scorePercent = calculateFinalScore(runningEarnedWeight, totalAvailableWeight || 1);
+
+    await this.col.doc(attemptId).update({
+      leaderboardPoints: runningPoints,
+      finalScore: scorePercent,
+      durationMs: runningDurationMs,
+      lastAnswerAt: serverReceivedAt,
+      updatedAt: serverReceivedAt,
+    });
+
+    // Update live leaderboard entry
+    try {
+      const participant = await participantsService.getById(attempt.participantId);
+      await leaderboardService.recordEntry(attempt.activityId, {
+        attemptId,
+        participantId: attempt.participantId,
+        participantCode: participant.participantCode || null,
+        displayName: participant.name,
+        status: 'in_progress',
+        locked: false,
+        leaderboardPoints: runningPoints,
+        scorePercent,
+        finalScore: scorePercent,
+        answeredCount: answersSnap.size,
+        totalQuestions: totalQuestionsCount,
+        durationMs: runningDurationMs,
+        rankTimeAt: serverReceivedAt,
+        lastAnswerAt: serverReceivedAt,
+        completedAt: null,
+      });
+    } catch (_e) {
+      // Non-fatal if participant lookup fails
+    }
 
     return { recorded: true, questionId: input.questionId };
   }
 
-  async finishAttempt(attemptId: string, token?: string): Promise<{ attempt: AttemptDocument; summary: any }> {
+  async finishAttempt(attemptId: string, token?: string): Promise<{ attempt: any; summary: any }> {
     const attemptDoc = await this.col.doc(attemptId).get();
     if (!attemptDoc.exists) throw new NotFoundError(`Attempt '${attemptId}' not found`);
     const attempt = attemptDoc.data() as AttemptDocument;
     this.verifyToken(attempt, token);
 
     if (attempt.status === 'completed') {
-      return { attempt, summary: { finalScore: attempt.finalScore, totalLeaderboardPoints: attempt.leaderboardPoints } };
+      return { attempt: sanitizeAttempt(attempt), summary: { finalScore: attempt.finalScore, totalLeaderboardPoints: attempt.leaderboardPoints } };
     }
 
     const activity = await activitiesService.getById(attempt.activityId);
@@ -230,14 +503,34 @@ export class AttemptsService {
 
     const answersSnap = await this.answersCol.where('attemptId', '==', attemptId).get();
     const answers = answersSnap.docs.map((d) => d.data() as any);
-    const scoringQuestions: ScoringQuestion[] = attempt.questionSnapshots.map((q) => ({
-      id: q.questionId,
-      weight: q.weight,
-      speedBonusEnabled: q.speedBonusEnabled,
-      speedBonusPercent: q.speedBonusPercent,
-      timeReferenceSeconds: q.timeReferenceSeconds,
-      correctChoiceIds: q.correctChoiceIds,
-    }));
+
+    // Load from snapshot
+    let scoringQuestions: ScoringQuestion[] = [];
+    let totalQuestionsCount = 0;
+
+    const snapDoc = await this.snapshotsCol.doc(attemptId).get();
+    if (snapDoc.exists) {
+      const snapData = snapDoc.data() as AttemptSnapshotDocument;
+      scoringQuestions = snapData.questions.map((q) => ({
+        id: q.questionId,
+        weight: q.weight,
+        speedBonusEnabled: q.speedBonusEnabled,
+        speedBonusPercent: q.speedBonusPercent,
+        timeReferenceSeconds: q.timeReferenceSeconds,
+        correctChoiceIds: q.correctChoiceIds,
+      }));
+      totalQuestionsCount = snapData.questions.length;
+    } else if (attempt.questionSnapshots) {
+      scoringQuestions = attempt.questionSnapshots.map((q) => ({
+        id: q.questionId,
+        weight: q.weight,
+        speedBonusEnabled: q.speedBonusEnabled,
+        speedBonusPercent: q.speedBonusPercent,
+        timeReferenceSeconds: q.timeReferenceSeconds,
+        correctChoiceIds: q.correctChoiceIds,
+      }));
+      totalQuestionsCount = attempt.questionSnapshots.length;
+    }
 
     const outcome = calculateAttemptScores(scoringQuestions, answers);
     const completedAt = getClock().nowIso();
@@ -252,9 +545,31 @@ export class AttemptsService {
     };
 
     await this.col.doc(attemptId).update(updatedData);
-    await leaderboardService.rebuildLeaderboardSnapshot(attempt.activityId);
-    const finalAttempt: AttemptDocument = { ...attempt, ...updatedData };
 
+    try {
+      const participant = await participantsService.getById(attempt.participantId);
+      await leaderboardService.recordEntry(attempt.activityId, {
+        attemptId,
+        participantId: attempt.participantId,
+        participantCode: participant.participantCode || null,
+        displayName: participant.name,
+        status: 'completed',
+        locked: true,
+        leaderboardPoints: outcome.totalLeaderboardPoints,
+        scorePercent: outcome.finalScore,
+        finalScore: outcome.finalScore,
+        answeredCount: answers.length,
+        totalQuestions: totalQuestionsCount,
+        durationMs: outcome.totalDurationMs,
+        rankTimeAt: completedAt,
+        lastAnswerAt: attempt.lastAnswerAt || completedAt,
+        completedAt,
+      });
+    } catch (_e) {
+      // Non-fatal
+    }
+
+    const finalAttempt: AttemptDocument = { ...attempt, ...updatedData };
     return { attempt: sanitizeAttempt(finalAttempt, false), summary: outcome };
   }
 
@@ -276,7 +591,7 @@ export function sanitizeAttempt(attempt: AttemptDocument, isOperator = false): a
   });
   return {
     ...rest,
-    questionSnapshots: safeSnapshots,
+    ...(questionSnapshots ? { questionSnapshots: safeSnapshots } : {}),
   };
 }
 

@@ -56,12 +56,33 @@ service cloud.firestore {
         resource.data.hideLeaderboardFromParticipants != true
       );
       allow write: if false;
+
+      match /entries/{entryId} {
+        allow read: if isOperator() || (
+          get(/databases/$(database)/documents/leaderboardSnapshots/$(snapshotId)).data.status in ['published', 'closed'] &&
+          get(/databases/$(database)/documents/leaderboardSnapshots/$(snapshotId)).data.hideLeaderboardFromParticipants != true
+        );
+        allow write: if false;
+      }
     }
 
     // Stats snapshots: operator-only read, server-only write
     match /statsSnapshots/{snapshotId} {
       allow read: if isOperator();
       allow write: if false;
+    }
+
+    // Question states, attempt snapshots, group phases: server-only
+    match /questionStates/{stateId} {
+      allow read, write: if false;
+    }
+
+    match /attemptSnapshots/{snapshotId} {
+      allow read, write: if false;
+    }
+
+    match /activityGroupPhases/{phaseId} {
+      allow read, write: if false;
     }
 
     // Default deny all other paths
