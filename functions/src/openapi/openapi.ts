@@ -10,7 +10,7 @@ import './docs/participants.docs';
 import './docs/attempts.docs';
 import './docs/leaderboard.docs';
 import './docs/stats.docs';
-import './docs/storage.docs';
+import './docs/assets.docs';
 
 export function getOpenApiDocument() {
   const generator = new OpenApiGeneratorV31(registry.definitions);
@@ -47,7 +47,7 @@ export function getOpenApiDocument() {
       { name: 'Attempts', description: 'Participant test execution and submission' },
       { name: 'Leaderboard', description: 'Realtime points and speed bonus rankings' },
       { name: 'Stats', description: 'Aggregate metrics, question stats, and pre/post comparison' },
-      { name: 'Storage', description: 'Secure question image upload authorization' },
+      { name: 'Assets', description: 'Cloudinary asset storage management and signed uploads' },
     ],
   });
 }

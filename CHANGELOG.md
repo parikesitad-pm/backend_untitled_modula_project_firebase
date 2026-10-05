@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-06 (Cloudinary Media Migration)
+
+### Added
+- **Asset Storage Provider Abstraction**: Created provider-neutral `AssetStorageProvider` interface (`functions/src/modules/assets/providers/asset-storage-provider.ts`) and first-class `CloudinaryAssetStorageProvider` implementation (`cloudinary.provider.ts`). Configured dependency injection and clean factory (`getAssetStorageProvider`, `setAssetStorageProvider`).
+- **Signed Direct Upload Intent Endpoint**: Added `POST /api/assets/upload-intent` (protected by `assets:manage` capability) returning short-lived signatures for direct browser-to-Cloudinary upload. Image bytes do not pass through the MODULA API server.
+- **Server-Side Upload Confirmation**: Added `POST /api/assets/confirm` to verify uploaded Cloudinary asset existence and metadata before attaching to questions. Enforces format (`jpg`, `jpeg`, `png`, `webp`), max file size (5 MB), and dynamic folder context. Operates idempotently.
+- **Dynamic Asset Organization**: Generated folder path `untitled-modula/workspaces/default/activities/{activityId}/questions/{questionId}` with unguessable server-side random hex `publicId` values (32 characters).
+- **Trusted Delivery Transformation**: Questions deliver HTTPS delivery URLs generated from trusted stored Cloudinary metadata (`f_auto, q_auto`).
+- **Automatic Asset Replacement & Cleanup**: Replacing or deleting question images safely triggers Cloudinary asset destruction without breaking Firestore document references.
+- **OpenAPI 3.1 `Assets` Specification**: Added `Assets` tag documenting upload intent and confirmation endpoints; removed Google signed URL examples.
+- **Dedicated Migration Integration Test Suite**: Added `functions/tests/integration/cloudinary-assets.test.ts` covering 14 test cases with zero reliance on real credentials.
+
+### Changed
+- **Removed Firebase Storage Runtime Dependency**: Deprecated `admin.storage()` and runtime signed URLs. Removed Storage emulator requirements from the media test path. Marked legacy `/api/storage` routes deprecated.
+- Updated `QuestionsService` and `AttemptsService` to consume `AssetStorageProvider` for delivery URLs and asset metadata.
+
 ## [0.2.2] - 2026-10-05 (Sprint 1.1 Addendum 2 - Final Corrections)
 
 ### Added

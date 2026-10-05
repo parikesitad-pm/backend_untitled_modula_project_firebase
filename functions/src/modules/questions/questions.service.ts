@@ -1,7 +1,7 @@
 import { db } from '../../config/firebase';
 import { NotFoundError, ConflictError } from '../../lib/errors';
 import { CreateQuestionInput, UpdateQuestionInput, ReorderQuestionsInput, ChoiceInput } from './questions.schema';
-import { storageService } from '../storage/storage.service';
+import { getAssetStorageProvider, StoredAsset } from '../assets/providers';
 import { getClock } from '../../lib/clock';
 
 export interface ChoiceDocument {
@@ -25,6 +25,7 @@ export interface QuestionWithChoices {
   timeReferenceSeconds: number;
   imagePath?: string | null;
   imageUrl?: string | null;
+  asset?: StoredAsset | null;
   comparisonKey?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -104,6 +105,7 @@ export class QuestionsService {
     const questions = qSnap.docs.map((d) => d.data() as any);
     questions.sort((a, b) => a.position - b.position);
 
+    const provider = getAssetStorageProvider();
     const results: QuestionWithChoices[] = [];
     for (const q of questions) {
       const cSnap = await this.choicesCol.where('questionId', '==', q.id).get();
@@ -112,8 +114,10 @@ export class QuestionsService {
 
       const sanitizedChoices = isPublic ? choices.map(({ isCorrect, ...rest }) => rest) : choices;
       let imageUrl: string | null = null;
-      if (q.imagePath) {
-        imageUrl = await storageService.getSignedReadUrl(q.imagePath);
+      if (q.asset) {
+        imageUrl = provider.buildDeliveryUrl(q.asset);
+      } else if (q.imageUrl) {
+        imageUrl = q.imageUrl;
       }
 
       results.push({ ...q, imageUrl, choices: sanitizedChoices });
@@ -131,10 +135,13 @@ export class QuestionsService {
     const choices = cSnap.docs.map((d) => d.data() as ChoiceDocument);
     choices.sort((a, b) => a.position - b.position);
 
+    const provider = getAssetStorageProvider();
     const sanitizedChoices = isPublic ? choices.map(({ isCorrect, ...rest }) => rest) : choices;
     let imageUrl: string | null = null;
-    if (q.imagePath) {
-      imageUrl = await storageService.getSignedReadUrl(q.imagePath);
+    if (q.asset) {
+      imageUrl = provider.buildDeliveryUrl(q.asset);
+    } else if (q.imageUrl) {
+      imageUrl = q.imageUrl;
     }
 
     return { ...q, imageUrl, choices: sanitizedChoices };
@@ -204,6 +211,14 @@ export class QuestionsService {
     choicesSnap.docs.forEach((d) => batch.delete(d.ref));
     batch.delete(this.questionsCol.doc(id));
     await batch.commit();
+
+    if (current.asset && current.asset.publicId) {
+      try {
+        await getAssetStorageProvider().deleteAsset(current.asset.publicId);
+      } catch (err) {
+        console.warn('Failed to delete Cloudinary asset upon question deletion:', err);
+      }
+    }
   }
 
   async reorder(input: ReorderQuestionsInput): Promise<void> {

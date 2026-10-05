@@ -16,9 +16,9 @@ export class CloudinaryAssetStorageProvider implements AssetStorageProvider {
 
   private configure(): void {
     cloudinary.config({
-      cloud_name: env.CLOUDINARY_CLOUD_NAME,
-      api_key: env.CLOUDINARY_API_KEY,
-      api_secret: env.CLOUDINARY_API_SECRET,
+      cloud_name: env.CLOUDINARY_CLOUD_NAME || 'modula-cloud',
+      api_key: env.CLOUDINARY_API_KEY || 'modula-key',
+      api_secret: env.CLOUDINARY_API_SECRET || 'modula-secret',
       secure: true,
     });
   }
@@ -27,6 +27,10 @@ export class CloudinaryAssetStorageProvider implements AssetStorageProvider {
     const workspaceId = input.workspaceId || 'default';
     const rootFolder = env.CLOUDINARY_ROOT_ASSET_FOLDER || 'untitled-modula';
     const assetFolder = `${rootFolder}/workspaces/${workspaceId}/activities/${input.activityId}/questions/${input.questionId}`;
+
+    const cloudName = env.CLOUDINARY_CLOUD_NAME || 'modula-cloud';
+    const apiKey = env.CLOUDINARY_API_KEY || 'modula-key';
+    const apiSecret = env.CLOUDINARY_API_SECRET || 'modula-secret';
 
     // Unguessable server-generated random public ID
     const publicId = crypto.randomBytes(16).toString('hex');
@@ -40,15 +44,15 @@ export class CloudinaryAssetStorageProvider implements AssetStorageProvider {
       upload_preset: uploadPreset,
     };
 
-    const signature = cloudinary.utils.api_sign_request(paramsToSign, env.CLOUDINARY_API_SECRET);
-    const uploadUrl = `https://api.cloudinary.com/v1_1/${env.CLOUDINARY_CLOUD_NAME}/image/upload`;
+    const signature = cloudinary.utils.api_sign_request(paramsToSign, apiSecret);
+    const uploadUrl = `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`;
     const expiresAt = new Date((timestamp + 3600) * 1000).toISOString();
 
     return {
       provider: 'cloudinary',
       uploadUrl,
-      cloudName: env.CLOUDINARY_CLOUD_NAME,
-      apiKey: env.CLOUDINARY_API_KEY,
+      cloudName,
+      apiKey,
       timestamp,
       signature,
       uploadPreset,
@@ -58,10 +62,22 @@ export class CloudinaryAssetStorageProvider implements AssetStorageProvider {
     };
   }
 
+  private sanitizePublicId(publicId: string): string {
+    if (!publicId || typeof publicId !== 'string') {
+      throw new Error('Invalid public_id: must be a non-empty string');
+    }
+    const trimmed = publicId.trim();
+    if (!/^[a-zA-Z0-9_\-\/]+$/.test(trimmed) || trimmed.includes('..')) {
+      throw new Error('Invalid public_id: contains disallowed characters');
+    }
+    return trimmed;
+  }
+
   async verifyAsset(publicId: string): Promise<StoredAsset> {
-    const res = await cloudinary.api.resource(publicId);
+    const sanitizedId = this.sanitizePublicId(publicId);
+    const res = await cloudinary.api.resource(sanitizedId);
     return {
-      assetId: (res.asset_id as string) || publicId,
+      assetId: (res.asset_id as string) || sanitizedId,
       publicId: res.public_id as string,
       version: Number(res.version),
       resourceType: (res.resource_type as string) || 'image',
@@ -76,11 +92,14 @@ export class CloudinaryAssetStorageProvider implements AssetStorageProvider {
   }
 
   async deleteAsset(publicId: string): Promise<void> {
-    await cloudinary.uploader.destroy(publicId, { invalidate: true });
+    const sanitizedId = this.sanitizePublicId(publicId);
+    await cloudinary.uploader.destroy(sanitizedId, { invalidate: true });
   }
 
   buildDeliveryUrl(asset: StoredAsset, options?: DeliveryOptions): string {
+    const cloudName = env.CLOUDINARY_CLOUD_NAME || 'modula-cloud';
     return cloudinary.url(asset.publicId, {
+      cloud_name: cloudName,
       secure: true,
       fetch_format: options?.format || 'auto',
       quality: options?.quality || 'auto',

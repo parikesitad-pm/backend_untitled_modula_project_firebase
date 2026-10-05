@@ -27,12 +27,12 @@ The core parent entity is **Activity**. An Activity represents a complete unit c
 
 - **Runtime Engine**: Node.js `22` (strictly pinned in `functions/package.json`)
 - **Serverless Compute**: Firebase Cloud Functions v2 (HTTP Express API)
-- **Database**: Cloud Firestore with Composite Indexes
+- **Database**: Cloud Firestore with Composite Indexes (Data & Realtime Leaderboards)
 - **Authentication**: Firebase Authentication + Private Firestore Operator Records with Bcrypt
-- **Storage**: Firebase Storage with security policies for question media assets
+- **Media Asset Storage**: Cloudinary (Signed direct uploads, dynamic folder routing, transformation delivery)
 - **Validation**: Zod with `@asteasolutions/zod-to-openapi`
 - **API Specification**: OpenAPI 3.1 & Swagger UI with `@apidevtools/swagger-parser` validation
-- **Testing**: Vitest (serial execution `fileParallelism: false`) & Supertest with Firebase Emulator Suite
+- **Testing**: Vitest (serial execution `fileParallelism: false`) & Supertest with Firebase Emulator Suite (Auth & Firestore)
 
 All dependencies are strictly pinned to exact versions (no `^` or `~` prefixes).
 
@@ -234,7 +234,79 @@ Operators are authored and maintained via dedicated management endpoints (tagged
 
 ---
 
-## 8. Local URLs & Hosting Configuration
+## 8. Cloudinary Media Architecture & Direct Upload Flow
+
+MODULA decouples persistent database and authentication concerns from media asset delivery:
+- **Firebase**: Authentication, Cloud Firestore (Database, Realtime Leaderboards), Cloud Functions.
+- **Cloudinary**: Question diagrams, cover images, and branding assets.
+
+Default quiz music is not uploaded to Cloudinary; it is shipped as static frontend assets.
+
+### Environment Configuration (Server-Only)
+The following server environment variables must be configured (see `.env.example`):
+```bash
+CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=your_api_key
+CLOUDINARY_API_SECRET=your_api_secret
+CLOUDINARY_UPLOAD_PRESET=modula_question_images_signed
+CLOUDINARY_ROOT_ASSET_FOLDER=untitled-modula
+```
+`CLOUDINARY_API_SECRET` is server-only and is never returned in API responses, logs, OpenAPI specs, or Firestore documents.
+
+### Direct Browser Upload & Confirmation Sequence
+
+```
+[Browser / Builder]                  [MODULA Backend]                 [Cloudinary]
+       │                                     │                              │
+       │ 1. POST /api/assets/upload-intent   │                              │
+       ├────────────────────────────────────>│                              │
+       │                                     │ Validate MIME, <=5MB, auth   │
+       │                                     │ Generate random public_id    │
+       │                                     │ Compute signature            │
+       │ 2. Return signed intent parameters  │                              │
+       │<────────────────────────────────────┤                              │
+       │                                                                    │
+       │ 3. POST direct multipart upload (file, signature, upload_preset)   │
+       ├───────────────────────────────────────────────────────────────────>│
+       │ 4. Direct upload success                                           │
+       │<───────────────────────────────────────────────────────────────────┤
+       │                                                                    │
+       │ 5. POST /api/assets/confirm (activityId, questionId, publicId)     │
+       ├────────────────────────────────────>│                              │
+       │                                     │ 6. Server verify asset       │
+       │                                     ├─────────────────────────────>│
+       │                                     │ 7. Return verified resource  │
+       │                                     │<─────────────────────────────┤
+       │                                     │ Enforce format, size, folder │
+       │                                     │ Persist trusted metadata     │
+       │                                     │ Destroy old media if replaced│
+       │ 8. Return confirmed delivery URL    │                              │
+       │<────────────────────────────────────┤                              │
+```
+
+1. **Upload Intent (`POST /api/assets/upload-intent`)**:
+   - Protected: authenticated operator/editor.
+   - Enforces format (`image/jpeg`, `image/png`, `image/webp`), max source size (5 MB), positive dimensions, and activity/question ownership.
+   - Computes dynamic folder: `untitled-modula/workspaces/default/activities/{activityId}/questions/{questionId}`.
+   - Generates unguessable server-side random hex `publicId` (32 characters).
+   - Generates SHA-1 HMAC signature and returns direct upload parameters without exposing the API secret.
+2. **Direct Browser Upload**:
+   - Client sends file bytes directly to `https://api.cloudinary.com/v1_1/<cloudName>/image/upload`.
+   - Media bytes never traverse or load MODULA backend serverless instances.
+3. **Server Confirmation (`POST /api/assets/confirm`)**:
+   - Calls Cloudinary resource API server-side to independently verify uploaded asset metadata.
+   - Validates format, enforces declared bytes $\le 5$ MB, and validates dynamic folder context.
+   - Transactionally persists trusted metadata on question document: `assetId`, `publicId`, `version`, `resourceType`, `format`, `width`, `height`, `bytes`, `secureUrl`, `assetFolder`, `provider: 'cloudinary'`.
+   - Idempotent: repeated calls with the same `publicId` return current confirmed metadata without duplicate work.
+4. **Delivery & Participant Exposure**:
+   - Published questions deliver Cloudinary HTTPS URLs with automatic browser format and quality negotiation (`f_auto, q_auto`).
+   - Internal administrative asset metadata is stripped from participant payloads.
+5. **Deletion & Safe Replacement**:
+   - When question images are replaced or questions are deleted, old Cloudinary assets are cleanly destroyed (`uploader.destroy(publicId, { invalidate: true })`) without leaving dangling or broken Firestore references.
+
+---
+
+## 9. Local URLs & Hosting Configuration
 
 Firebase Hosting is configured with rewrite rules routing `/api/**` to Cloud Function `api`.
 
@@ -250,7 +322,7 @@ Firebase Hosting is configured with rewrite rules routing `/api/**` to Cloud Fun
 
 ---
 
-## 9. Deviations and Trade-offs
+## 10. Deviations and Trade-offs
 
 1. **Subcollection `entries` for Leaderboard**:
    To avoid a single shared hot document and reduce write contention under high concurrency, individual participant entries are stored in `leaderboardSnapshots/{activityId}/entries/{attemptId}` with independent per-attempt writes, while raw attempts and answers remain the durable source of truth and metadata remains at `leaderboardSnapshots/{activityId}`.
@@ -262,16 +334,16 @@ Firebase Hosting is configured with rewrite rules routing `/api/**` to Cloud Fun
    Rather than fragile position-based index pairing across two distinct activities, pre/post delta pairing matches questions using explicit `comparisonKey` attributes.
 5. **Direct Firestore Role Authority**:
    To eliminate security windows where revoked or downgraded operators use unexpired ID tokens, role and status are loaded directly from the Firestore operator record on every protected request with zero cache.
-6. **Storage Signed URLs in Emulator**:
-   In production Google Cloud environments, signed URLs are generated via Google Cloud Storage RSA private keys. In the local Firebase Emulator Suite, service account keys are not available; therefore, the storage service generates an emulator-compatible media URL fallback (`http://127.0.0.1:9199/v0/b/...`) when running under `FUNCTIONS_EMULATOR=true`.
-7. **OpenAPI `Operators` Tag**:
-   An explicit `Operators` tag was added to OpenAPI 3.1 to document operator administration endpoints alongside `Auth`, `Activities`, `Questions`, `Attempts`, `Leaderboard`, `Stats`, and `Storage`.
+6. **Cloudinary Asset Storage Provider**:
+   Firebase Storage runtime (`admin.storage()`) and Google signed upload/read URLs have been removed from runtime in favor of `AssetStorageProvider` with `CloudinaryAssetStorageProvider`. The media test path requires only Auth and Firestore emulators.
+7. **OpenAPI `Assets` Tag**:
+   Replaced deprecated `Storage` tag with `Assets` documenting signed upload intents and server-side asset confirmations.
 8. **Vitest Serial Test Execution**:
    Because multiple integration test suites interact with shared Firestore emulator collections (`operators`, `loginAttempts`, `attempts`), `fileParallelism: false` is configured in `functions/vitest.config.ts`. This prevents cross-file race conditions on document resets.
 
 ---
 
-## 10. Known Limitations
+## 11. Known Limitations
 
 1. **Network Latency Variance**:
    Server-authoritative timing measures elapsed time using `serverReceivedAt`. On mobile networks with high jitter or intermittent disconnects, latency spikes may slightly increase recorded duration.
@@ -280,7 +352,7 @@ Firebase Hosting is configured with rewrite rules routing `/api/**` to Cloud Fun
 
 ---
 
-## 11. Local Development & Verification
+## 12. Local Development & Verification
 
 ### 1. Prerequisites
 - Node.js `22`
@@ -298,19 +370,27 @@ npm --prefix functions run openapi:validate
 
 ### 3. Run Automated Tests in Emulator Suite
 ```bash
-firebase emulators:exec --only auth,firestore,functions,hosting,storage "npm --prefix functions test"
+firebase emulators:exec --only auth,firestore "npm --prefix functions test"
 ```
-The test suite executes 207 tests across 15 test suites covering role matrices, live leaderboards, attempt security, enter marker timing, pre/post identity requirements, attempt snapshots, leak prevention, pagination, and emulator smoke tests.
+The test suite executes 221 tests across 16 test suites covering role matrices, live leaderboards, attempt security, enter marker timing, pre/post identity requirements, attempt snapshots, leak prevention, pagination, emulator smoke tests, and Cloudinary media migration.
 
 ### 4. Running Emulators Locally
 ```bash
-firebase emulators:start
+firebase emulators:start --only auth,firestore,functions,hosting
 ```
 
 ---
 
-## 12. Deployment to Firebase
+## 13. Deployment to Firebase & Cloudinary
 
+### 1. Cloudinary Setup
+In the Cloudinary Console:
+1. Create a signed upload preset named `modula_question_images_signed` (Signing Mode: `Signed`).
+2. Restrict allowed formats to `jpg, jpeg, png, webp`.
+3. Set environment variables in Cloud Functions runtime:
+   `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, `CLOUDINARY_UPLOAD_PRESET`, `CLOUDINARY_ROOT_ASSET_FOLDER`.
+
+### 2. Firebase Deployment
 1. Log in to Firebase CLI:
 ```bash
 firebase login
@@ -323,25 +403,21 @@ firebase use <project-id>
 ```bash
 firebase deploy --only firestore
 ```
-4. Deploy Storage rules:
-```bash
-firebase deploy --only storage
-```
-5. Deploy Cloud Functions:
+4. Deploy Cloud Functions:
 ```bash
 firebase deploy --only functions
 ```
-6. Deploy Hosting rewrites:
+5. Deploy Hosting rewrites:
 ```bash
 firebase deploy --only hosting
 ```
-7. Bootstrap initial owner operator:
+6. Bootstrap initial owner operator:
 ```bash
 OWNER_USERNAME=owner OWNER_ACCESS_CODE=your-secure-code-min-12-chars npm --prefix functions run bootstrap:owner
 ```
 
 ---
 
-## 13. License
+## 14. License
 
 Copyright (c) 2026 parikesitad-pm. Released under the MIT License.

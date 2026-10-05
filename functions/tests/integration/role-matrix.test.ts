@@ -244,12 +244,40 @@ describe('Role Authorization Matrix Tests', () => {
       path: () => '/api/groups/matrix-group/comparison',
       allowedRoles: ['crown', 'owner', 'manager', 'operator'],
     },
-    // 10. Storage Upload URL (All roles per Section 4 table)
+    // 10. Storage Upload URL (All roles per Section 4 table - deprecated)
     {
       name: 'POST /api/storage/upload-url',
       method: 'post',
       path: () => '/api/storage/upload-url',
       payload: () => ({ filename: 'sample.png', contentType: 'image/png' }),
+      allowedRoles: ['crown', 'owner', 'manager', 'operator'],
+    },
+    // 11. Assets Upload Intent (All roles per Capability assets:manage)
+    {
+      name: 'POST /api/assets/upload-intent',
+      method: 'post',
+      path: () => '/api/assets/upload-intent',
+      payload: () => ({
+        activityId: 'act-matrix',
+        questionId: 'q-matrix',
+        fileName: 'test.png',
+        mimeType: 'image/png',
+        sizeBytes: 1000,
+        width: 100,
+        height: 100,
+      }),
+      allowedRoles: ['crown', 'owner', 'manager', 'operator'],
+    },
+    // 12. Assets Confirm (All roles per Capability assets:manage)
+    {
+      name: 'POST /api/assets/confirm',
+      method: 'post',
+      path: () => '/api/assets/confirm',
+      payload: () => ({
+        activityId: 'act-matrix',
+        questionId: 'q-matrix',
+        publicId: 'test-public-id',
+      }),
       allowedRoles: ['crown', 'owner', 'manager', 'operator'],
     },
   ];

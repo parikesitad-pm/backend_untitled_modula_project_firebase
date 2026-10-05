@@ -1,8 +1,9 @@
-import { storage } from '../../config/firebase';
-import { env } from '../../config/env';
 import { RequestUploadUrlInput, UploadUrlResponse } from './storage.schema';
 import { generateSecureToken } from '../../lib/hash';
 
+/**
+ * @deprecated Legacy Firebase Storage service. Replaced by AssetsService and CloudinaryAssetStorageProvider.
+ */
 export class StorageService {
   private getExtension(fileName: string, mimeType: string): string {
     const ext = fileName.split('.').pop()?.toLowerCase();
@@ -21,42 +22,16 @@ export class StorageService {
     const storagePath = `activities/${input.activityId}/questions/${qId}/${randomId}.${ext}`;
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
-    const bucketName = env.STORAGE_BUCKET;
-    const bucket = storage.bucket(bucketName);
-    const file = bucket.file(storagePath);
-
-    let uploadUrl = '';
-    try {
-      const [signedUrl] = await file.getSignedUrl({
-        version: 'v4',
-        action: 'write',
-        expires: Date.now() + 15 * 60 * 1000,
-        contentType: input.mimeType,
-      });
-      uploadUrl = signedUrl;
-    } catch (_e) {
-      uploadUrl = `http://127.0.0.1:9199/v0/b/${bucketName}/o?name=${encodeURIComponent(storagePath)}`;
-    }
-
-    const publicUrl = `https://storage.googleapis.com/${bucketName}/${storagePath}`;
-    return { storagePath, uploadUrl, publicUrl, expiresAt };
+    return {
+      storagePath,
+      uploadUrl: `https://deprecated.storage.local/upload/${encodeURIComponent(storagePath)}`,
+      publicUrl: `https://deprecated.storage.local/${encodeURIComponent(storagePath)}`,
+      expiresAt,
+    };
   }
 
   async getSignedReadUrl(storagePath: string): Promise<string> {
-    const bucketName = env.STORAGE_BUCKET;
-    const bucket = storage.bucket(bucketName);
-    const file = bucket.file(storagePath);
-
-    try {
-      const [signedUrl] = await file.getSignedUrl({
-        version: 'v4',
-        action: 'read',
-        expires: Date.now() + 30 * 60 * 1000, // 30 mins
-      });
-      return signedUrl;
-    } catch (_e) {
-      return `http://127.0.0.1:9199/v0/b/${bucketName}/o/${encodeURIComponent(storagePath)}?alt=media`;
-    }
+    return `https://deprecated.storage.local/${encodeURIComponent(storagePath)}`;
   }
 }
 

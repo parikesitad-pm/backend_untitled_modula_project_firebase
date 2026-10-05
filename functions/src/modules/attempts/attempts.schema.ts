@@ -26,6 +26,7 @@ export const SanitizedQuestionSchema = z.object({
   bodyText: z.string().optional(),
   type: z.string(),
   imagePath: z.string().nullable().optional(),
+  imageUrl: z.string().nullable().optional(),
   comparisonKey: z.string().nullable().optional(),
   choices: z.array(SanitizedChoiceSchema),
 });

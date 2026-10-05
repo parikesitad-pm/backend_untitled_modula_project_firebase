@@ -9,6 +9,7 @@ import { publicRoutes } from './modules/participants/public.routes';
 import { attemptsRoutes } from './modules/attempts/attempts.routes';
 import { leaderboardRoutes } from './modules/leaderboard/leaderboard.routes';
 import { statsRoutes } from './modules/stats/stats.routes';
+import { assetsRoutes } from './modules/assets/assets.routes';
 import { storageRoutes } from './modules/storage/storage.routes';
 import { operatorsRoutes } from './modules/auth/operators.routes';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
@@ -34,6 +35,7 @@ export function createApp(): Express {
   apiRouter.use('/public', publicRoutes);
   apiRouter.use('/attempts', attemptsRoutes);
   apiRouter.use('/leaderboards', leaderboardRoutes);
+  apiRouter.use('/assets', assetsRoutes);
   apiRouter.use('/storage', storageRoutes);
   apiRouter.use('/operators', operatorsRoutes);
   apiRouter.use('/', statsRoutes);

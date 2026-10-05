@@ -1,5 +1,4 @@
 import { db } from '../../config/firebase';
-import { env } from '../../config/env';
 import { getClock } from '../../lib/clock';
 import { NotFoundError, ForbiddenError, UnprocessableEntityError } from '../../lib/errors';
 import { AuthOperator } from '../../middleware/auth.middleware';
@@ -101,9 +100,9 @@ export class AssetsService {
 
     // 3. Validate ownership/path/context
     const expectedSubpath = `activities/${input.activityId}/questions/${input.questionId}`;
-    if (verifiedAsset.assetFolder && !verifiedAsset.assetFolder.includes(expectedSubpath)) {
+    if (!verifiedAsset.assetFolder || !verifiedAsset.assetFolder.includes(expectedSubpath)) {
       throw new UnprocessableEntityError(
-        `Asset folder '${verifiedAsset.assetFolder}' does not match expected activity and question context`,
+        `Asset folder '${verifiedAsset.assetFolder || ''}' does not match expected activity and question context`,
         'INVALID_ASSET_CONTEXT'
       );
     }

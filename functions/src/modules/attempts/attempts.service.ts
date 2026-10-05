@@ -23,6 +23,7 @@ export interface SnapshotQuestion {
   bodyText: string;
   type: string;
   imagePath?: string | null;
+  imageUrl?: string | null;
   comparisonKey?: string | null;
   weight: number;
   speedBonusEnabled: boolean;
@@ -78,6 +79,7 @@ export function sanitizeSnapshotQuestion(q: SnapshotQuestion): SanitizedQuestion
     bodyText: q.bodyText,
     type: q.type,
     imagePath: q.imagePath || null,
+    imageUrl: q.imageUrl || null,
     comparisonKey: q.comparisonKey || null,
     choices: (q.choices || []).map(({ id, body, position }) => ({ id, body, position })),
   };
@@ -156,6 +158,7 @@ export class AttemptsService {
       bodyText: q.body,
       type: q.type,
       imagePath: q.imagePath || null,
+      imageUrl: q.imageUrl || null,
       comparisonKey: q.comparisonKey || null,
       weight: q.weight > 0 ? q.weight : 1,
       speedBonusEnabled: !!q.speedBonusEnabled,

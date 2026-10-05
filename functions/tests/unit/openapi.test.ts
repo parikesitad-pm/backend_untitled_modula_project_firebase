@@ -18,7 +18,7 @@ describe('OpenAPI & Swagger Documentation', () => {
     expect(tagNames).toContain('Attempts');
     expect(tagNames).toContain('Leaderboard');
     expect(tagNames).toContain('Stats');
-    expect(tagNames).toContain('Storage');
+    expect(tagNames).toContain('Assets');
   });
 
   it('serves OpenAPI JSON at /api/openapi.json and /openapi.json', async () => {
