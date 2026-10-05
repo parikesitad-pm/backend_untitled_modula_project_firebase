@@ -1,15 +1,20 @@
 export const env = {
   NODE_ENV: process.env.NODE_ENV || 'development',
   PORT: parseInt(process.env.PORT || '5001', 10),
-  FIREBASE_PROJECT_ID: process.env.GCLOUD_PROJECT || process.env.FIREBASE_PROJECT_ID || 'modula-backend-dev',
-  STORAGE_BUCKET: process.env.STORAGE_BUCKET || 'modula-backend-dev.appspot.com',
+  FIREBASE_PROJECT_ID: process.env.GCLOUD_PROJECT || process.env.FIREBASE_PROJECT_ID || 'untitled-modula-backend',
+  FIREBASE_CLIENT_EMAIL: process.env.FIREBASE_CLIENT_EMAIL || '',
+  FIREBASE_PRIVATE_KEY: process.env.FIREBASE_PRIVATE_KEY || '',
+  STORAGE_BUCKET: process.env.STORAGE_BUCKET || 'untitled-modula-backend.appspot.com',
   CLOUDINARY_CLOUD_NAME: process.env.CLOUDINARY_CLOUD_NAME || '',
   CLOUDINARY_API_KEY: process.env.CLOUDINARY_API_KEY || '',
   CLOUDINARY_API_SECRET: process.env.CLOUDINARY_API_SECRET || '',
   CLOUDINARY_UPLOAD_PRESET: process.env.CLOUDINARY_UPLOAD_PRESET || 'modula_question_images_signed',
   CLOUDINARY_ROOT_ASSET_FOLDER: process.env.CLOUDINARY_ROOT_ASSET_FOLDER || 'untitled-modula',
+  ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || '',
+  PUBLIC_API_BASE_URL: process.env.PUBLIC_API_BASE_URL || '',
+  LOGIN_MAX_FAILURES: parseInt(process.env.LOGIN_MAX_FAILURES || '5', 10),
+  LOGIN_WINDOW_SECONDS: parseInt(process.env.LOGIN_WINDOW_SECONDS || '900', 10),
   DEFAULT_SPEED_BONUS_CAP_PERCENT: 20,
   DEFAULT_TIME_REFERENCE_SECONDS: 30,
   MAX_QUESTION_BODY_LENGTH: 255,
 } as const;
-

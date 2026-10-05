@@ -7,10 +7,18 @@ export const LoginRequestSchema = z.object({
 
 export type LoginRequest = z.infer<typeof LoginRequestSchema>;
 
+export const OperatorWorkspaceMembershipSchema = z.object({
+  workspaceId: z.string(),
+  role: z.enum(['workspace_admin', 'editor', 'viewer']),
+});
+export type OperatorWorkspaceMembership = z.infer<typeof OperatorWorkspaceMembershipSchema>;
+
 export const OperatorResponseSchema = z.object({
   uid: z.string(),
   username: z.string(),
-  role: z.enum(['operator', 'manager', 'owner', 'crown']),
+  role: z.enum(['operator', 'manager', 'owner', 'crown']).optional(),
+  platformRole: z.enum(['platform_owner']).nullable().optional(),
+  workspaces: z.array(OperatorWorkspaceMembershipSchema).optional(),
   active: z.boolean(),
 });
 

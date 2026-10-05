@@ -1,6 +1,6 @@
-# MODULA Activity Backend — Firebase First (Hardened v0.2.0)
+# MODULA Activity Backend — Firebase First (Hardened v0.4.0)
 
-Backend-first implementation for MODULA Activity platform built with Firebase (Cloud Functions v2, Firestore, Auth, Storage, and Emulator Suite), Express, TypeScript, and Zod. Hardened for production concurrency, cryptographic attempt security, role hierarchy authorization, server-authoritative scoring, and privacy-safe realtime leaderboards.
+Backend-first implementation for MODULA Activity platform built with Firebase (Cloud Functions v2, Firestore, Auth, Storage, and Emulator Suite), Express, TypeScript, and Zod. Hardened for production concurrency, cryptographic attempt security, multi-workspace client account isolation, role hierarchy authorization, server-authoritative scoring, and privacy-safe realtime leaderboards.
 
 ---
 
@@ -28,8 +28,8 @@ The core parent entity is **Activity**. An Activity represents a complete unit c
 - **Runtime Engine**: Node.js `22` (strictly pinned in `functions/package.json`)
 - **Serverless Compute**: Firebase Cloud Functions v2 (HTTP Express API)
 - **Database**: Cloud Firestore with Composite Indexes (Data & Realtime Leaderboards)
-- **Authentication**: Firebase Authentication + Private Firestore Operator Records with Bcrypt
-- **Media Asset Storage**: Cloudinary (Signed direct uploads, dynamic folder routing, transformation delivery)
+- **Authentication**: Firebase Authentication + Private Firestore Operator & Membership Records with Bcrypt
+- **Media Asset Storage**: Cloudinary (Signed direct uploads, dynamic workspace folder routing, transformation delivery)
 - **Validation**: Zod with `@asteasolutions/zod-to-openapi`
 - **API Specification**: OpenAPI 3.1 & Swagger UI with `@apidevtools/swagger-parser` validation
 - **Testing**: Vitest (serial execution `fileParallelism: false`) & Supertest with Firebase Emulator Suite (Auth & Firestore)
@@ -49,25 +49,42 @@ Participants in the Participant Area are anonymous, so sequential or known `atte
 5. **Participant Code Normalization**: All participant codes are trimmed, uppercased, and collapsed of redundant whitespace prior to indexing or queries.
 6. **Max Attempts Guard**: `settings.maxAttempts` (default: 1) is enforced inside an atomic Firestore transaction. Over-limit submissions return `409 Conflict` (`MAX_ATTEMPTS_REACHED`).
 
-### Role Authorization Matrix & Firestore Role Authority
-MODULA enforces a single organization model with a strict role hierarchy (`operator < manager < owner < crown`) centralized in a single permission matrix (`functions/src/middleware/auth.middleware.ts`):
+### Multi-Workspace Architecture & Client Accounts Model
+MODULA supports multi-workspace isolation under a single platform instance operated by the platform owner:
+- **No Self-Service / No Billing**: Client workspaces are provisioned by `platform_owner` (no public registration or billing tier complexity).
+- **Workspace Isolation**: Activities, questions, pre/post phase locks, participant registries, and media asset folders are strictly compartmentalized by `workspaceId`. Activities have an immutable `workspaceId` (defaults to `'internal'`).
+- **Global Public Routing**: Public participant (`/{slug}`) and leaderboard (`/leaderboard-{slug}`) routes remain globally addressed and participant-facing; workspace boundaries are administrative and builder-facing.
+- **Cross-Workspace Pre/Post Protection**: Linked pre/post activities cannot share groups across different workspaces (`400 CROSS_WORKSPACE_GROUP`).
+- **Workspace Status Lifecycle**: Workspaces support `active` and `archived` states. Archived workspaces are strictly read-only for workspace members; only `platform_owner` can manage or unarchive them.
 
-| Capability | operator | manager | owner | crown |
+### Role Authorization & Workspace Capability Matrix
+MODULA implements two levels of authorization:
+1. **Platform Role**:
+   - `platform_owner`: Global superuser possessing all capabilities across all workspaces.
+   - `member`: Standard user whose access is granted on a per-workspace membership basis.
+2. **Workspace Roles**:
+   - `workspace_admin`: Complete administrative control over the workspace and its members.
+   - `editor`: Authoring, modifying, and uploading content; cannot publish or view sensitive participant PII.
+   - `viewer`: Read-only access to activities, questions, and aggregate stats.
+3. **Legacy Backward Compatibility**:
+   - Legacy Sprint 1.1 roles (`operator`, `manager`, `owner`, `crown`) are preserved on the `'internal'` workspace.
+   - `owner` and `crown` map to `platform_owner`.
+   - `manager` maps to `workspace_admin` for `'internal'`.
+   - `operator` maps to `editor` for `'internal'`.
+
+| Capability | viewer | editor | workspace_admin | platform_owner |
 |---|:---:|:---:|:---:|:---:|
-| `GET /api/auth/me` | Yes | Yes | Yes | Yes |
-| Read activities, questions, leaderboard, stats, question-stats, comparison | Yes | Yes | Yes | Yes |
-| Create/update activities and questions, reorder | Yes | Yes | Yes | Yes |
-| Storage upload URL | Yes | Yes | Yes | Yes |
-| Publish, close, archive activity | No | Yes | Yes | Yes |
-| `GET .../participants` and `GET .../responses` (contain PII) | No | Yes | Yes | Yes |
-| Hard-delete a draft activity | No | No | Yes | Yes |
-| Manage operators (`/api/operators/**`) | No | No | Yes | Yes |
+| `read:content` (Activities, questions, aggregate stats, leaderboards) | Yes | Yes | Yes | Yes |
+| `write:content` (Draft activities, questions, asset upload intents) | No | Yes | Yes | Yes |
+| `activity:lifecycle` / `publish:content` (Publish, close, archive activities) | No | No | Yes | Yes |
+| `read:pii` (View participant registries, intake responses, raw PII) | No | No | Yes | Yes |
+| `activity:delete` (Delete draft activities with zero attempts) | No | No | Yes | Yes |
+| `admin:workspace` (Manage workspace settings & memberships) | No | No | Yes | Yes |
+| `platform:admin` (Create workspaces, manage operators globally) | No | No | No | Yes |
 
-- **Firestore Role Authority**: While a Firebase ID token proves user identity (`uid`), it is **not** the authority for authorization roles. On every protected request, the server executes `auth.verifyIdToken(token, true)` with revocation check, loads the operator's record directly from the `operators` collection in Firestore, and enforces `role` and `active` status from that live record.
-- **Immediate Effect**: Role downgrades or account deactivations take effect immediately on the very next request, even with a previously issued, unexpired ID token.
-- **Informational Custom Claims**: Custom claims on tokens are maintained for frontend UI convenience only and are strictly ignored by server authorization guards.
-- **Role Escalation Rules**: Operators can only create or promote users to roles **strictly below** their own level. The `crown` role can assign any role. No operator can alter their own role.
-- **Last Owner Protection**: The system rejects deactivating or demoting the last remaining active `owner` or `crown` with `409 Conflict` (`LAST_OWNER_PROTECTION`).
+- **Firestore Role & Membership Authority**: On every protected request, the server executes `auth.verifyIdToken(token, true)`, checks the live operator document in Firestore, and evaluates workspace memberships directly from `memberships/{workspaceId}_{uid}` in Firestore with zero client caching.
+- **Immediate Effect**: Role updates, membership additions, or account deactivations take effect immediately on the very next request.
+- **Last Owner Protection**: The system rejects deactivating or demoting the last active `platform_owner` (or legacy `owner`/`crown`) with `409 Conflict` (`LAST_OWNER_PROTECTION`).
 
 ### Login Hardening & Brute-Force Rate Limiting
 - **Password Hashing**: Bcrypt with cost factor `12` is locked across all operator passwords and access codes.
@@ -82,10 +99,12 @@ All Firestore data is structured across the following collections:
 
 | Collection Path | Purpose & Access |
 |---|---|
-| `activities` | Root activity documents (metadata, schedules, settings). Public reads when published/closed; operator-managed. |
+| `workspaces` | Workspace tenant entities (`name`, `slug`, `status: active \| archived`). Managed by platform owners and workspace admins. |
+| `memberships/{workspaceId}_{uid}` | Deterministic membership mappings linking operators to workspaces with roles (`workspace_admin`, `editor`, `viewer`). |
+| `activities` | Root activity documents with immutable `workspaceId`. Public reads when published/closed; workspace capability-governed. |
 | `questions` | Question authoring documents for activities. Stripped of `isCorrect` on public read. |
 | `choices` | Choice authoring documents per question. Stripped of `isCorrect` on public read. |
-| `participants` | Participant identity registry (`name`, `participantCode`, `email`). Operator-only access. |
+| `participants` | Participant identity registry (`name`, `participantCode`, `email`). Operator-only (`read:pii`). |
 | `attempts` | Attempt sessions with cryptographic token hash and running aggregates. |
 | `answers` | Immutable individual question answer records. Server-only direct access. |
 | `questionStates/{attemptId}_{questionId}` | Server-only enter markers tracking `firstEnteredAt`, `lastEnteredAt`, and `enterCount`. |
@@ -93,8 +112,8 @@ All Firestore data is structured across the following collections:
 | `leaderboardSnapshots/{activityId}` | Meta document for activity leaderboard (`state`: `live \| final`, `participantCount`). |
 | `leaderboardSnapshots/{activityId}/entries/{attemptId}` | High-concurrency subcollection with one document per attempt. Zero PII. |
 | `statsSnapshots/{activityId}` | Aggregated statistics snapshot per activity. |
-| `activityGroupPhases/{groupId}_{phase}` | Atomic lock enforcing at most 1 `pre` and 1 `post` activity per pre/post group. |
-| `operators` | Operator accounts with bcrypt access code hash, role, and active status. Server-only access. |
+| `activityGroupPhases/{workspaceId}_{groupId}_{phase}` | Atomic lock enforcing at most 1 `pre` and 1 `post` activity per group within each workspace. |
+| `operators` | Operator accounts with bcrypt access code hash, platformRole/legacy role, and active status. Server-only access. |
 | `loginAttempts` | Server-only rate limiting failure records for operator authentication. |
 
 ### Firestore & Storage Security Rules
@@ -223,14 +242,41 @@ To protect historical contest data and audit trails:
 
 ---
 
-## 7. Operators Management
+## 7. Workspaces & Operators Management
 
-Operators are authored and maintained via dedicated management endpoints (tagged under `Operators` in OpenAPI 3.1):
-- `GET /api/operators` — List operators with cursor pagination (owner/crown only).
+### Workspaces Endpoints
+Workspaces are provisioned and managed via dedicated endpoints (tagged under `Workspaces` and `Memberships` in OpenAPI 3.1):
+- `GET /api/workspaces` — List workspaces visible to caller (platform owners see all; members see their active workspaces).
+- `POST /api/workspaces` — Provision a new workspace tenant (`platform_owner` only).
+- `GET /api/workspaces/:workspaceId` — Retrieve workspace details and status.
+- `PATCH /api/workspaces/:workspaceId` — Update workspace name or metadata (`admin:workspace`).
+- `POST /api/workspaces/:workspaceId/archive` — Archive workspace, placing it into read-only mode (`platform_owner` only).
+- `GET /api/workspaces/:workspaceId/members` — List members of a workspace (`admin:workspace`).
+- `POST /api/workspaces/:workspaceId/members` — Assign or update workspace membership (`admin:workspace`).
+- `PATCH /api/workspaces/:workspaceId/members/:uid` — Update member role (`admin:workspace`).
+- `DELETE /api/workspaces/:workspaceId/members/:uid` — Remove member from workspace (`admin:workspace`).
+
+### Operators Management Endpoints
+Operators are authored and maintained globally (tagged under `Operators` in OpenAPI 3.1):
+- `GET /api/operators` — List operators with cursor pagination (`platform_owner` or legacy `owner`/`crown`).
 - `POST /api/operators` — Create operator account, seed Auth user, set custom claims, and store cost-12 bcrypt access code hash.
 - `PATCH /api/operators/:uid` — Update role, active status, or reset access code.
 - `POST /api/operators/:uid/deactivate` — Instantly deactivate operator and revoke Firebase tokens.
 - `POST /api/operators/:uid/reactivate` — Reactivate an inactive operator.
+
+### Legacy Data Migration
+To backfill legacy Sprint 1.1 data into the multi-workspace model:
+```bash
+# Dry run (inspection only)
+npm --prefix functions run migrate:workspaces
+
+# Apply migration to Firestore
+npm --prefix functions run migrate:workspaces -- --apply
+```
+The migration script is idempotent:
+1. Creates the default `'internal'` workspace if missing.
+2. Backfills any activities missing `workspaceId` with `'internal'`.
+3. Seeds workspace memberships in `memberships` for all existing operators based on legacy roles.
 
 ---
 
@@ -261,6 +307,7 @@ CLOUDINARY_ROOT_ASSET_FOLDER=untitled-modula
        │ 1. POST /api/assets/upload-intent   │                              │
        ├────────────────────────────────────>│                              │
        │                                     │ Validate MIME, <=5MB, auth   │
+       │                                     │ Resolve activity workspaceId │
        │                                     │ Generate random public_id    │
        │                                     │ Compute signature            │
        │ 2. Return signed intent parameters  │                              │
@@ -285,9 +332,9 @@ CLOUDINARY_ROOT_ASSET_FOLDER=untitled-modula
 ```
 
 1. **Upload Intent (`POST /api/assets/upload-intent`)**:
-   - Protected: authenticated operator/editor.
+   - Protected: authenticated user with `write:content` capability on the activity's workspace.
    - Enforces format (`image/jpeg`, `image/png`, `image/webp`), max source size (5 MB), positive dimensions, and activity/question ownership.
-   - Computes dynamic folder: `untitled-modula/workspaces/default/activities/{activityId}/questions/{questionId}`.
+   - Computes dynamic workspace-scoped folder: `untitled-modula/workspaces/{workspaceId}/activities/{activityId}/questions/{questionId}`.
    - Generates unguessable server-side random hex `publicId` (32 characters).
    - Generates SHA-1 HMAC signature and returns direct upload parameters without exposing the API secret.
 2. **Direct Browser Upload**:
@@ -295,7 +342,7 @@ CLOUDINARY_ROOT_ASSET_FOLDER=untitled-modula
    - Media bytes never traverse or load MODULA backend serverless instances.
 3. **Server Confirmation (`POST /api/assets/confirm`)**:
    - Calls Cloudinary resource API server-side to independently verify uploaded asset metadata.
-   - Validates format, enforces declared bytes $\le 5$ MB, and validates dynamic folder context.
+   - Validates format, enforces declared bytes $\le 5$ MB, and validates dynamic workspace-scoped folder context.
    - Transactionally persists trusted metadata on question document: `assetId`, `publicId`, `version`, `resourceType`, `format`, `width`, `height`, `bytes`, `secureUrl`, `assetFolder`, `provider: 'cloudinary'`.
    - Idempotent: repeated calls with the same `publicId` return current confirmed metadata without duplicate work.
 4. **Delivery & Participant Exposure**:
@@ -372,7 +419,7 @@ npm --prefix functions run openapi:validate
 ```bash
 firebase emulators:exec --only auth,firestore "npm --prefix functions test"
 ```
-The test suite executes 221 tests across 16 test suites covering role matrices, live leaderboards, attempt security, enter marker timing, pre/post identity requirements, attempt snapshots, leak prevention, pagination, emulator smoke tests, and Cloudinary media migration.
+The test suite executes 260 tests across 18 test suites covering role matrices, live leaderboards, attempt security, enter marker timing, pre/post identity requirements, attempt snapshots, leak prevention, pagination, emulator smoke tests, Cloudinary media migration, and multi-workspace client accounts isolation.
 
 ### 4. Running Emulators Locally
 ```bash

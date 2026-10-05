@@ -45,7 +45,11 @@ export class StatsController {
 
   async getGroupComparison(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const comparison = await statsService.getGroupComparison(req.params.groupId);
+      const hasPii =
+        req.operator?.platformRole === 'platform_owner' ||
+        req.workspaceMembership?.role === 'workspace_admin' ||
+        (req.operator?.role && ['crown', 'owner', 'manager'].includes(req.operator.role));
+      const comparison = await statsService.getGroupComparison(req.params.groupId, !!hasPii);
       sendSuccess(res, comparison);
     } catch (err) {
       next(err);

@@ -35,6 +35,7 @@ export const CreateActivitySchema = z
     mode: ActivityModeSchema,
     phase: ActivityPhaseSchema.optional().default('standalone'),
     groupId: z.string().optional(),
+    workspaceId: z.string().min(1, 'workspaceId is required').default('internal'),
     opensAt: z.string().datetime({ message: 'opensAt must be valid ISO 8601 string' }),
     closesAt: z.string().datetime({ message: 'closesAt must be valid ISO 8601 string' }),
     settings: ActivitySettingsSchema.optional().default({}),
@@ -67,6 +68,7 @@ export const UpdateActivitySchema = z
     status: ActivityStatusSchema.optional(),
     phase: ActivityPhaseSchema.optional(),
     groupId: z.string().optional(),
+    workspaceId: z.string().optional(),
     opensAt: z.string().datetime().optional(),
     closesAt: z.string().datetime().optional(),
     settings: ActivitySettingsSchema.partial().optional(),
@@ -91,6 +93,7 @@ export const ActivityQuerySchema = z.object({
   status: ActivityStatusSchema.optional(),
   mode: ActivityModeSchema.optional(),
   groupId: z.string().optional(),
+  workspaceId: z.string().optional(),
 });
 
 export type ActivityQuery = z.infer<typeof ActivityQuerySchema>;

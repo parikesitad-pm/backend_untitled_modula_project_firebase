@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-06 (Multi-Workspace Client Accounts Isolation)
+
+### Added
+- **Multi-Workspace Tenant Architecture**: Provisioned `workspaces` and `memberships` collections with deterministic membership IDs (`${workspaceId}_${uid}`) for atomic conflict-free membership management.
+- **Granular Workspace RBAC**: Introduced `PlatformRole` (`platform_owner`, `member`) and `WorkspaceRole` (`workspace_admin`, `editor`, `viewer`) with capability-based authorization (`read:content`, `write:content`, `activity:lifecycle`, `read:pii`, `admin:workspace`, `platform:admin`).
+- **Workspace Administration Endpoints**: Added endpoints for workspace lifecycle management (`GET /api/workspaces`, `POST /api/workspaces`, `GET /api/workspaces/:id`, `PATCH /api/workspaces/:id`, `POST /api/workspaces/:id/archive`) and membership management (`GET /api/workspaces/:id/members`, `POST /api/workspaces/:id/members`, `PATCH /api/workspaces/:id/members/:uid`, `DELETE /api/workspaces/:id/members/:uid`).
+- **Dynamic Cloudinary Folder Segregation**: Updated signed upload intents and server confirmations to enforce workspace-scoped folder paths: `untitled-modula/workspaces/{workspaceId}/activities/{activityId}/questions/{questionId}`.
+- **Pre/Post Group Workspace Isolation**: Scoped atomic pre/post phase locks to `activityGroupPhases/{workspaceId}_{groupId}_{phase}` and blocked cross-workspace group comparisons (`CROSS_WORKSPACE_GROUP`).
+- **Participant PII Isolation in Analytics**: Protected participant registries and response exports; restricted non-admin roles (`viewer`, `editor`) from accessing participant PII.
+- **Idempotent Data Migration Script**: Added `functions/scripts/migrate-workspaces.ts` (`npm --prefix functions run migrate:workspaces -- --apply`) to backfill `'internal'` workspace, tag existing activities, and seed operator memberships.
+- **Updated Firestore Security Rules**: Added rules for `workspaces` and `memberships` with helper functions (`isPlatformOwner`, `hasWorkspaceMembership`, `canAccessWorkspace`).
+- **OpenAPI 3.1 Documentation**: Added `Workspaces` and `Memberships` tags, schemas, and endpoint documentation.
+- **Dedicated Multi-Workspace Test Suite**: Added 19 comprehensive integration tests in `functions/tests/integration/workspaces.test.ts` bringing total test suite count to 260 tests.
+
+### Changed
+- **`GET /api/auth/me` Payload**: Now returns `platformRole` and active `workspaces` membership list while preserving backward-compatible root fields.
+- **Activity Schemas & Service**: Added immutable `workspaceId` property (defaulting to `'internal'`), workspace query filtering, and active workspace validation.
+- **Backward Compatibility for Legacy Roles**: Seamlessly mapped legacy Sprint 1.1 roles (`operator`, `manager`, `owner`, `crown`) to corresponding capabilities on the `'internal'` workspace.
+
 ## [0.3.0] - 2026-10-06 (Cloudinary Media Migration)
 
 ### Added

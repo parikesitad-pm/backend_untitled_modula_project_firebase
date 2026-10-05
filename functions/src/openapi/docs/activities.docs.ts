@@ -14,6 +14,7 @@ const ActivityOutSchema = z.object({
   status: z.enum(['draft', 'published', 'closed', 'archived']),
   phase: z.enum(['pre', 'post', 'standalone']).optional(),
   groupId: z.string().optional(),
+  workspaceId: z.string(),
   opensAt: z.string(),
   closesAt: z.string(),
   settings: z.record(z.unknown()),

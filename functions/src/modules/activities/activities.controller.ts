@@ -8,7 +8,7 @@ export class ActivitiesController {
     try {
       const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
       const cursor = req.query.cursor as string | undefined;
-      const result = await activitiesService.list(req.query as any, limit, cursor);
+      const result = await activitiesService.list(req.query as any, req.operator, limit, cursor);
       sendSuccess(res, result.items, undefined, 200, result.meta);
     } catch (err) {
       next(err);

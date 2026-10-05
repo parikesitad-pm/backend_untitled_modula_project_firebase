@@ -1,11 +1,13 @@
 import { db } from '../../config/firebase';
-import { NotFoundError, ConflictError, BadRequestError } from '../../lib/errors';
+import { NotFoundError, ConflictError, BadRequestError, ForbiddenError } from '../../lib/errors';
 import { CreateActivityInput, UpdateActivityInput, ActivityQuery } from './activities.schema';
 import { getClock } from '../../lib/clock';
 import { leaderboardService } from '../leaderboard/leaderboard.service';
+import { AuthOperator } from '../../middleware/auth.middleware';
 
 export interface ActivityDocument extends CreateActivityInput {
   id: string;
+  workspaceId: string;
   status: 'draft' | 'published' | 'closed' | 'archived';
   createdBy: string;
   createdAt: string;
@@ -37,6 +39,27 @@ export class ActivitiesService {
   }
 
   async create(input: CreateActivityInput, createdBy: string): Promise<ActivityDocument> {
+    const workspaceId = input.workspaceId || 'internal';
+    const wsDoc = await db.collection('workspaces').doc(workspaceId).get();
+    if (!wsDoc.exists) {
+      if (workspaceId === 'internal') {
+        const now = getClock().nowIso();
+        await db.collection('workspaces').doc('internal').set({
+          id: 'internal',
+          name: 'Internal',
+          slug: 'internal',
+          status: 'active',
+          createdBy: 'system',
+          createdAt: now,
+          updatedAt: now,
+        });
+      } else {
+        throw new NotFoundError(`Workspace '${workspaceId}' not found`, 'WORKSPACE_NOT_FOUND');
+      }
+    } else if (wsDoc.data()?.status !== 'active') {
+      throw new BadRequestError('Cannot create activity in archived workspace', 'WORKSPACE_ARCHIVED');
+    }
+
     await this.assertUniqueSlug(input.slug);
 
     if (input.phase === 'pre' || input.phase === 'post') {
@@ -48,11 +71,26 @@ export class ActivitiesService {
       throw new BadRequestError('Group activity requires pre or post phase', 'PHASE_REQUIRED');
     }
 
+    if (input.groupId) {
+      const existingGroupSnap = await this.col.where('groupId', '==', input.groupId).get();
+      for (const doc of existingGroupSnap.docs) {
+        const data = doc.data();
+        const docWs = data.workspaceId || 'internal';
+        if (docWs !== workspaceId) {
+          throw new BadRequestError(
+            `Group '${input.groupId}' already belongs to workspace '${docWs}'. Cross-workspace grouping is not allowed.`,
+            'CROSS_WORKSPACE_GROUP'
+          );
+        }
+      }
+    }
+
     const now = getClock().nowIso();
     const docRef = this.col.doc();
 
     const activity: ActivityDocument = {
       ...input,
+      workspaceId,
       id: docRef.id,
       status: 'draft',
       createdBy,
@@ -61,7 +99,7 @@ export class ActivitiesService {
     };
 
     if (input.groupId && (input.phase === 'pre' || input.phase === 'post')) {
-      const resRef = this.phasesCol.doc(`${input.groupId}_${input.phase}`);
+      const resRef = this.phasesCol.doc(`${workspaceId}_${input.groupId}_${input.phase}`);
       await db.runTransaction(async (t) => {
         const existingRes = await t.get(resRef);
         if (existingRes.exists && existingRes.data()?.activityId !== docRef.id) {
@@ -71,6 +109,7 @@ export class ActivitiesService {
           );
         }
         t.set(resRef, {
+          workspaceId,
           groupId: input.groupId,
           phase: input.phase,
           activityId: docRef.id,
@@ -87,6 +126,7 @@ export class ActivitiesService {
 
   async list(
     filter: ActivityQuery,
+    operator?: AuthOperator,
     limit = 50,
     cursor?: string
   ): Promise<{ items: ActivityDocument[]; meta: { limit: number; nextCursor: string | null } }> {
@@ -99,7 +139,35 @@ export class ActivitiesService {
     if (filter.mode) query = query.where('mode', '==', filter.mode);
     if (filter.groupId) query = query.where('groupId', '==', filter.groupId);
 
-    query = query.orderBy('createdAt', 'desc').limit(pageLimit + 1);
+    // Enforce workspace access permissions if caller is not platform_owner
+    let allowedWorkspaceIds: string[] | null = null;
+    if (operator && operator.platformRole !== 'platform_owner') {
+      if (filter.workspaceId) {
+        const memDoc = await db.collection('memberships').doc(`${filter.workspaceId}_${operator.uid}`).get();
+        if (!memDoc.exists || !memDoc.data()?.active) {
+          if (filter.workspaceId === 'internal' && operator.role) {
+            allowedWorkspaceIds = ['internal'];
+          } else {
+            throw new ForbiddenError('Not authorized for this workspace', 'UNAUTHORIZED_WORKSPACE');
+          }
+        } else {
+          allowedWorkspaceIds = [filter.workspaceId];
+        }
+      } else {
+        const memSnap = await db.collection('memberships')
+          .where('uid', '==', operator.uid)
+          .where('active', '==', true)
+          .get();
+        allowedWorkspaceIds = memSnap.docs.map((d) => d.data().workspaceId as string);
+        if (operator.role && !allowedWorkspaceIds.includes('internal')) {
+          allowedWorkspaceIds.push('internal');
+        }
+      }
+    } else if (filter.workspaceId) {
+      allowedWorkspaceIds = [filter.workspaceId];
+    }
+
+    query = query.orderBy('createdAt', 'desc').limit(pageLimit + 100);
 
     if (cursor) {
       const cursorDoc = await this.col.doc(cursor).get();
@@ -110,15 +178,28 @@ export class ActivitiesService {
 
     const snap = await query.get();
     let docs = snap.docs;
+
     if (!filter.status) {
       docs = docs.filter((d) => d.data().status !== 'archived');
+    }
+
+    if (allowedWorkspaceIds !== null) {
+      docs = docs.filter((d) => allowedWorkspaceIds!.includes(d.data().workspaceId || 'internal'));
     }
 
     const hasMore = docs.length > pageLimit;
     const finalDocs = hasMore ? docs.slice(0, pageLimit) : docs;
     const nextCursor = hasMore ? finalDocs[finalDocs.length - 1].id : null;
 
-    const items = finalDocs.map((d) => ({ id: d.id, ...d.data() } as ActivityDocument));
+    const items = finalDocs.map((d) => {
+      const data = d.data();
+      return {
+        id: d.id,
+        workspaceId: data.workspaceId || 'internal',
+        ...data,
+      } as ActivityDocument;
+    });
+
     return { items, meta: { limit: pageLimit, nextCursor } };
   }
 
@@ -127,7 +208,12 @@ export class ActivitiesService {
     if (!doc.exists) {
       throw new NotFoundError(`Activity with id '${id}' not found`);
     }
-    return { id: doc.id, ...doc.data() } as ActivityDocument;
+    const data = doc.data()!;
+    return {
+      id: doc.id,
+      workspaceId: data.workspaceId || 'internal',
+      ...data,
+    } as ActivityDocument;
   }
 
   async getBySlug(slug: string): Promise<ActivityDocument> {
@@ -136,11 +222,22 @@ export class ActivitiesService {
       throw new NotFoundError(`Activity with slug '${slug}' not found`);
     }
     const doc = snap.docs[0];
-    return { id: doc.id, ...doc.data() } as ActivityDocument;
+    const data = doc.data();
+    return {
+      id: doc.id,
+      workspaceId: data.workspaceId || 'internal',
+      ...data,
+    } as ActivityDocument;
   }
 
   async update(id: string, input: UpdateActivityInput): Promise<ActivityDocument> {
     const current = await this.getById(id);
+    const currentWs = current.workspaceId || 'internal';
+
+    if (input.workspaceId && input.workspaceId !== currentWs) {
+      throw new ConflictError('Cannot move activity between workspaces', 'IMMUTABLE_WORKSPACE');
+    }
+
     const attemptsSnap = await this.attemptsCol.where('activityId', '==', id).limit(1).get();
     const hasAttempts = !attemptsSnap.empty;
     const isLocked = current.status === 'published' || hasAttempts;
@@ -186,13 +283,28 @@ export class ActivitiesService {
       }
     }
 
+    if (newGroupId && newGroupId !== current.groupId) {
+      const existingGroupSnap = await this.col.where('groupId', '==', newGroupId).get();
+      for (const doc of existingGroupSnap.docs) {
+        if (doc.id !== id) {
+          const docWs = doc.data().workspaceId || 'internal';
+          if (docWs !== currentWs) {
+            throw new BadRequestError(
+              `Group '${newGroupId}' already belongs to workspace '${docWs}'. Cross-workspace grouping is not allowed.`,
+              'CROSS_WORKSPACE_GROUP'
+            );
+          }
+        }
+      }
+    }
+
     const phaseChanged = newPhase !== current.phase || newGroupId !== current.groupId;
     if (phaseChanged) {
       const oldResRef = current.groupId && (current.phase === 'pre' || current.phase === 'post')
-        ? this.phasesCol.doc(`${current.groupId}_${current.phase}`)
+        ? this.phasesCol.doc(`${currentWs}_${current.groupId}_${current.phase}`)
         : null;
       const newResRef = newGroupId && (newPhase === 'pre' || newPhase === 'post')
-        ? this.phasesCol.doc(`${newGroupId}_${newPhase}`)
+        ? this.phasesCol.doc(`${currentWs}_${newGroupId}_${newPhase}`)
         : null;
 
       await db.runTransaction(async (t) => {
@@ -205,6 +317,7 @@ export class ActivitiesService {
             );
           }
           t.set(newResRef, {
+            workspaceId: currentWs,
             groupId: newGroupId,
             phase: newPhase,
             activityId: id,
@@ -238,8 +351,9 @@ export class ActivitiesService {
       cSnap.docs.forEach((c) => batch.delete(c.ref));
       batch.delete(qDoc.ref);
     }
+    const currentWs = activity.workspaceId || 'internal';
     if (activity.groupId && (activity.phase === 'pre' || activity.phase === 'post')) {
-      const resRef = this.phasesCol.doc(`${activity.groupId}_${activity.phase}`);
+      const resRef = this.phasesCol.doc(`${currentWs}_${activity.groupId}_${activity.phase}`);
       batch.delete(resRef);
     }
     batch.delete(this.col.doc(id));
@@ -266,6 +380,7 @@ export class ActivitiesService {
     }
 
     const publishedAt = getClock().nowIso();
+    const currentWs = activity.workspaceId || 'internal';
     if (activity.phase === 'pre' || activity.phase === 'post') {
       if (!activity.groupId) {
         throw new BadRequestError('Linked pre/post activities require a groupId', 'GROUP_ID_REQUIRED');
@@ -278,7 +393,7 @@ export class ActivitiesService {
           'PARTICIPANT_CODE_REQUIRED_FOR_LINKED_ACTIVITY'
         );
       }
-      const resRef = this.phasesCol.doc(`${activity.groupId}_${activity.phase}`);
+      const resRef = this.phasesCol.doc(`${currentWs}_${activity.groupId}_${activity.phase}`);
       await db.runTransaction(async (t) => {
         const existingRes = await t.get(resRef);
         if (existingRes.exists && existingRes.data()?.activityId !== activity.id) {
@@ -288,6 +403,7 @@ export class ActivitiesService {
           );
         }
         t.set(resRef, {
+          workspaceId: currentWs,
           groupId: activity.groupId,
           phase: activity.phase,
           activityId: activity.id,

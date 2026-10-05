@@ -1,5 +1,5 @@
 import { db } from '../../config/firebase';
-import { NotFoundError } from '../../lib/errors';
+import { NotFoundError, BadRequestError } from '../../lib/errors';
 import { activitiesService } from '../activities/activities.service';
 import { questionsService } from '../questions/questions.service';
 import { normalizeParticipantCode } from '../participants/participants.schema';
@@ -271,11 +271,16 @@ export class StatsService {
     });
   }
 
-  async getGroupComparison(groupId: string): Promise<PrePostComparison> {
+  async getGroupComparison(groupId: string, includePii = true): Promise<PrePostComparison> {
     const snap = await db.collection('activities').where('groupId', '==', groupId).get();
     if (snap.empty) throw new NotFoundError(`No activities found for group '${groupId}'`);
 
     const activities = snap.docs.map((d) => ({ id: d.id, ...d.data() } as any));
+    const firstWs = activities[0].workspaceId || 'internal';
+    const hasCrossWorkspace = activities.some((a) => (a.workspaceId || 'internal') !== firstWs);
+    if (hasCrossWorkspace) {
+      throw new BadRequestError('Cross-workspace pre/post comparison is not allowed', 'CROSS_WORKSPACE_GROUP');
+    }
     const pre = activities.find((a) => a.phase === 'pre') || null;
     const post = activities.find((a) => a.phase === 'post') || null;
 
@@ -492,7 +497,7 @@ export class StatsService {
       unmatchedCount,
       totalParticipants: participantMap.size,
       matchedAverageDelta,
-      participants: participantsList,
+      participants: includePii ? participantsList : [],
       questionStatsDelta,
     };
   }

@@ -1,6 +1,6 @@
 {
   "name": "modula-backend-functions",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "MODULA Activity Backend - Firebase First",
   "author": "parikesitad-pm",
   "license": "MIT",
@@ -22,7 +22,9 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "openapi:validate": "tsx scripts/validate-openapi.ts",
-    "bootstrap:owner": "tsx scripts/bootstrap-owner.ts"
+    "bootstrap:owner": "tsx scripts/bootstrap-owner.ts",
+    "migrate:workspaces": "tsx scripts/migrate-workspaces.ts",
+    "smoke:production": "tsx scripts/smoke-production.ts"
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "7.3.0",

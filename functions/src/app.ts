@@ -1,5 +1,4 @@
 import express, { Express } from 'express';
-import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
 import { getOpenApiDocument } from './openapi/openapi';
 import { authRoutes } from './modules/auth/auth.routes';
@@ -12,14 +11,27 @@ import { statsRoutes } from './modules/stats/stats.routes';
 import { assetsRoutes } from './modules/assets/assets.routes';
 import { storageRoutes } from './modules/storage/storage.routes';
 import { operatorsRoutes } from './modules/auth/operators.routes';
+import { workspacesRoutes } from './modules/workspaces/workspaces.routes';
+import { corsMiddleware } from './middleware/cors.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 
 export function createApp(): Express {
   const app = express();
   const openApiDoc = getOpenApiDocument();
 
-  app.use(cors({ origin: true }));
+  app.use(corsMiddleware());
   app.use(express.json());
+
+  // Health check
+  const healthHandler = (_req: express.Request, res: express.Response) => {
+    res.status(200).json({
+      status: 'ok',
+      service: 'modula-backend',
+      version: '0.4.0',
+    });
+  };
+  app.get('/api/health', healthHandler);
+  app.get('/health', healthHandler);
 
   // API Documentation routes
   app.get('/api/openapi.json', (_req, res) => res.json(openApiDoc));
@@ -38,6 +50,7 @@ export function createApp(): Express {
   apiRouter.use('/assets', assetsRoutes);
   apiRouter.use('/storage', storageRoutes);
   apiRouter.use('/operators', operatorsRoutes);
+  apiRouter.use('/workspaces', workspacesRoutes);
   apiRouter.use('/', statsRoutes);
 
   // Mount router under both /api and root for Cloud Function compatibility

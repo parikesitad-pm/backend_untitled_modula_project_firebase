@@ -27,6 +27,23 @@ export class AssetsService {
     }
     const activityData = activityDoc.data() as any;
 
+    const targetWs = activityData.workspaceId || 'internal';
+    if (operator.platformRole !== 'platform_owner') {
+      const memDoc = await db.collection('memberships').doc(`${targetWs}_${operator.uid}`).get();
+      if (!memDoc.exists || !memDoc.data()?.active) {
+        if (targetWs === 'internal' && operator.role) {
+          // allowed for legacy operator
+        } else {
+          throw new ForbiddenError('Not authorized for this workspace', 'UNAUTHORIZED_WORKSPACE');
+        }
+      } else {
+        const memRole = memDoc.data()?.role;
+        if (memRole === 'viewer') {
+          throw new ForbiddenError('Viewers cannot modify assets', 'FORBIDDEN_CAPABILITY');
+        }
+      }
+    }
+
     if (operator.role === 'operator' && activityData.createdBy && activityData.createdBy !== operator.uid) {
       throw new ForbiddenError('Forbidden: Not authorized to modify this activity', 'UNAUTHORIZED_ACTIVITY');
     }
@@ -49,10 +66,11 @@ export class AssetsService {
   }
 
   async createUploadIntent(operator: AuthOperator, input: UploadIntentInput): Promise<UploadIntentResponse> {
-    await this.assertOperatorCanAccess(operator, input.activityId, input.questionId);
+    const { activityData } = await this.assertOperatorCanAccess(operator, input.activityId, input.questionId);
 
     const provider = getAssetStorageProvider();
     const intent = await provider.createSignedUploadIntent({
+      workspaceId: activityData.workspaceId || 'default',
       activityId: input.activityId,
       questionId: input.questionId,
       fileName: input.fileName,
@@ -66,7 +84,7 @@ export class AssetsService {
   }
 
   async confirmAsset(operator: AuthOperator, input: ConfirmAssetInput): Promise<ConfirmAssetResponse> {
-    const { questionData, questionRef } = await this.assertOperatorCanAccess(
+    const { activityData, questionData, questionRef } = await this.assertOperatorCanAccess(
       operator,
       input.activityId,
       input.questionId
@@ -99,8 +117,14 @@ export class AssetsService {
     }
 
     // 3. Validate ownership/path/context
-    const expectedSubpath = `activities/${input.activityId}/questions/${input.questionId}`;
-    if (!verifiedAsset.assetFolder || !verifiedAsset.assetFolder.includes(expectedSubpath)) {
+    const currentWs = activityData.workspaceId || 'default';
+    const expectedSubpath = `workspaces/${currentWs}/activities/${input.activityId}/questions/${input.questionId}`;
+    const legacySubpath = `workspaces/default/activities/${input.activityId}/questions/${input.questionId}`;
+
+    if (
+      !verifiedAsset.assetFolder ||
+      (!verifiedAsset.assetFolder.includes(expectedSubpath) && !verifiedAsset.assetFolder.includes(legacySubpath))
+    ) {
       throw new UnprocessableEntityError(
         `Asset folder '${verifiedAsset.assetFolder || ''}' does not match expected activity and question context`,
         'INVALID_ASSET_CONTEXT'

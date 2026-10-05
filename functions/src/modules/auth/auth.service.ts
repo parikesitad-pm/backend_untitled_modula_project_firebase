@@ -62,6 +62,12 @@ export class AuthService {
     }
 
     await auth.setCustomUserClaims(uid, { role });
+    let platformRole = data.platformRole ?? null;
+    if (platformRole === undefined || platformRole === null) {
+      if (role === 'crown' || role === 'owner') {
+        platformRole = 'platform_owner';
+      }
+    }
     const token = await auth.createCustomToken(uid, { role });
 
     return {
@@ -70,6 +76,7 @@ export class AuthService {
         uid,
         username: data.username || normalized,
         role,
+        platformRole,
         active: true,
       },
     };
@@ -81,10 +88,29 @@ export class AuthService {
       throw new NotFoundError('Operator record not found');
     }
     const data = doc.data()!;
+    let platformRole = data.platformRole ?? null;
+    if (platformRole === undefined || platformRole === null) {
+      if (data.role === 'crown' || data.role === 'owner') {
+        platformRole = 'platform_owner';
+      }
+    }
+
+    const memSnap = await db.collection('memberships')
+      .where('uid', '==', uid)
+      .where('active', '==', true)
+      .get();
+
+    const workspaces = memSnap.docs.map((d) => ({
+      workspaceId: d.data().workspaceId as string,
+      role: d.data().role as any,
+    }));
+
     return {
       uid: doc.id,
       username: data.username || data.usernameNormalized,
       role: data.role,
+      platformRole,
+      workspaces,
       active: data.active,
     };
   }

@@ -2,9 +2,45 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    function isOperator() {
+    function getOperator() {
+      return get(/databases/$(database)/documents/operators/$(request.auth.uid)).data;
+    }
+
+    function isActiveOperator() {
       return request.auth != null && 
-        request.auth.token.role in ['operator', 'manager', 'owner', 'crown'];
+        exists(/databases/$(database)/documents/operators/$(request.auth.uid)) &&
+        getOperator().active == true;
+    }
+
+    function isPlatformOwner() {
+      return isActiveOperator() && (
+        getOperator().platformRole == 'platform_owner' ||
+        getOperator().role in ['owner', 'crown']
+      );
+    }
+
+    function hasWorkspaceMembership(workspaceId) {
+      return isActiveOperator() &&
+        exists(/databases/$(database)/documents/memberships/$(workspaceId + '_' + request.auth.uid)) &&
+        get(/databases/$(database)/documents/memberships/$(workspaceId + '_' + request.auth.uid)).data.active == true;
+    }
+
+    function canAccessWorkspace(workspaceId) {
+      return isPlatformOwner() || hasWorkspaceMembership(workspaceId);
+    }
+
+    // Workspaces: platform owner or active members can read
+    match /workspaces/{workspaceId} {
+      allow read: if canAccessWorkspace(workspaceId);
+      allow write: if false;
+    }
+
+    // Memberships: platform owner or member self-read
+    match /memberships/{membershipId} {
+      allow read: if isPlatformOwner() || (
+        isActiveOperator() && resource.data.uid == request.auth.uid && resource.data.active == true
+      );
+      allow write: if false;
     }
 
     // Operators: server-only via Admin SDK
@@ -17,58 +53,91 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Activities: public read if published; write only for operators
+    // Activities: public read if published; operator read if workspace access; write server-only or operator
     match /activities/{activityId} {
-      allow read: if isOperator() || (resource.data.status == 'published');
-      allow write: if isOperator();
+      allow read: if (resource.data.status == 'published') ||
+        (canAccessWorkspace(resource.data.workspaceId != null ? resource.data.workspaceId : 'internal'));
+      allow write: if isPlatformOwner() ||
+        (hasWorkspaceMembership(resource.data.workspaceId != null ? resource.data.workspaceId : 'internal'));
     }
 
     // Questions & Choices: privileged to prevent answer leakage
     match /questions/{questionId} {
-      allow read, write: if isOperator();
+      allow read: if isPlatformOwner() || (
+        isActiveOperator() && canAccessWorkspace(
+          get(/databases/$(database)/documents/activities/$(resource.data.activityId)).data.workspaceId != null ?
+          get(/databases/$(database)/documents/activities/$(resource.data.activityId)).data.workspaceId : 'internal'
+        )
+      );
+      allow write: if false;
     }
 
     match /choices/{choiceId} {
-      allow read, write: if isOperator();
+      allow read, write: if false;
     }
 
     // Participants, Attempts, Answers: managed via Cloud Functions
     match /participants/{participantId} {
-      allow read: if isOperator();
+      allow read: if isPlatformOwner() || (
+        isActiveOperator() && canAccessWorkspace(
+          get(/databases/$(database)/documents/activities/$(resource.data.activityId)).data.workspaceId != null ?
+          get(/databases/$(database)/documents/activities/$(resource.data.activityId)).data.workspaceId : 'internal'
+        )
+      );
       allow write: if false;
     }
 
     match /attempts/{attemptId} {
-      allow read: if isOperator();
+      allow read: if isPlatformOwner() || (
+        isActiveOperator() && canAccessWorkspace(
+          get(/databases/$(database)/documents/activities/$(resource.data.activityId)).data.workspaceId != null ?
+          get(/databases/$(database)/documents/activities/$(resource.data.activityId)).data.workspaceId : 'internal'
+        )
+      );
       allow write: if false;
     }
 
     match /answers/{answerId} {
-      allow read: if isOperator();
+      allow read: if false;
       allow write: if false;
     }
 
-    // Leaderboard snapshots: operators can always read.
+    // Leaderboard snapshots: operators can always read with workspace access or platform_owner.
     // Public can only read when activity is published/closed and visibleToParticipants is true.
     match /leaderboardSnapshots/{snapshotId} {
-      allow read: if isOperator() || (
+      allow read: if isPlatformOwner() || (
         resource.data.status in ['published', 'closed'] &&
         resource.data.visibleToParticipants == true
+      ) || (
+        isActiveOperator() && canAccessWorkspace(
+          get(/databases/$(database)/documents/activities/$(snapshotId)).data.workspaceId != null ?
+          get(/databases/$(database)/documents/activities/$(snapshotId)).data.workspaceId : 'internal'
+        )
       );
       allow write: if false;
 
       match /entries/{entryId} {
-        allow read: if isOperator() || (
+        allow read: if isPlatformOwner() || (
           get(/databases/$(database)/documents/leaderboardSnapshots/$(snapshotId)).data.status in ['published', 'closed'] &&
           get(/databases/$(database)/documents/leaderboardSnapshots/$(snapshotId)).data.visibleToParticipants == true
+        ) || (
+          isActiveOperator() && canAccessWorkspace(
+            get(/databases/$(database)/documents/activities/$(snapshotId)).data.workspaceId != null ?
+            get(/databases/$(database)/documents/activities/$(snapshotId)).data.workspaceId : 'internal'
+          )
         );
         allow write: if false;
       }
     }
 
-    // Stats snapshots: operator-only read, server-only write
+    // Stats snapshots: operator-only read with workspace access, server-only write
     match /statsSnapshots/{snapshotId} {
-      allow read: if isOperator();
+      allow read: if isPlatformOwner() || (
+        isActiveOperator() && canAccessWorkspace(
+          get(/databases/$(database)/documents/activities/$(snapshotId)).data.workspaceId != null ?
+          get(/databases/$(database)/documents/activities/$(snapshotId)).data.workspaceId : 'internal'
+        )
+      );
       allow write: if false;
     }
 

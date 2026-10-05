@@ -17,7 +17,16 @@ export function errorHandler(
     return;
   }
 
-  console.error('[Unhandled Error]:', err);
+  if (err.message && err.message.startsWith('CORS origin not allowed')) {
+    sendError(res, 403, 'CORS_FORBIDDEN', 'Origin not allowed by CORS');
+    return;
+  }
+
+  if (process.env.NODE_ENV !== 'production') {
+    console.error('[Unhandled Error]:', err);
+  } else {
+    console.error('[Unhandled Error]:', err.message || 'Internal server error');
+  }
   sendError(
     res,
     500,

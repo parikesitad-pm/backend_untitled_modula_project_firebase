@@ -4,13 +4,14 @@ import { app } from '../../src/app';
 import { getOpenApiDocument } from '../../src/openapi/openapi';
 
 describe('OpenAPI & Swagger Documentation', () => {
-  it('generates valid OpenAPI 3.1.0 document with all 8 tags', () => {
+  it('generates valid OpenAPI 3.1.0 document with all 11 tags', () => {
     const doc = getOpenApiDocument();
     expect(doc.openapi).toBe('3.1.0');
     expect(doc.info.title).toBe('MODULA Activity Backend API');
-    expect(doc.tags?.length).toBe(8);
+    expect(doc.tags?.length).toBe(11);
 
     const tagNames = doc.tags?.map((t) => t.name);
+    expect(tagNames).toContain('System');
     expect(tagNames).toContain('Auth');
     expect(tagNames).toContain('Activities');
     expect(tagNames).toContain('Questions');
@@ -19,6 +20,8 @@ describe('OpenAPI & Swagger Documentation', () => {
     expect(tagNames).toContain('Leaderboard');
     expect(tagNames).toContain('Stats');
     expect(tagNames).toContain('Assets');
+    expect(tagNames).toContain('Workspaces');
+    expect(tagNames).toContain('Memberships');
   });
 
   it('serves OpenAPI JSON at /api/openapi.json and /openapi.json', async () => {
