@@ -265,10 +265,17 @@ describe('Auth & Activities Integration Tests', () => {
 
     const pubRes = await request(app).get('/api/public/public-active-act');
     expect(pubRes.status).toBe(200);
+    expect(pubRes.body.data.questionCount).toBe(1);
+    expect(pubRes.body.data.questions).toBeUndefined();
 
-    const questions = pubRes.body.data.questions;
-    expect(questions.length).toBe(1);
-    for (const choice of questions[0].choices) {
+    // First question is revealed at start without answer leaks
+    const startRes = await request(app)
+      .post('/api/public/public-active-act/start')
+      .send({ name: 'Active Participant', participantCode: 'ACT-01' });
+    expect(startRes.status).toBe(201);
+    const firstQ = startRes.body.data.firstQuestion;
+    expect(firstQ.choices.length).toBe(2);
+    for (const choice of firstQ.choices) {
       expect(choice).not.toHaveProperty('isCorrect');
     }
   });

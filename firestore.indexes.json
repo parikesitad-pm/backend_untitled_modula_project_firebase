@@ -41,7 +41,8 @@
         { "fieldPath": "leaderboardPoints", "order": "DESCENDING" },
         { "fieldPath": "scorePercent", "order": "DESCENDING" },
         { "fieldPath": "durationMs", "order": "ASCENDING" },
-        { "fieldPath": "rankTimeAt", "order": "ASCENDING" }
+        { "fieldPath": "rankTimeAt", "order": "ASCENDING" },
+        { "fieldPath": "attemptId", "order": "ASCENDING" }
       ]
     }
   ],

@@ -1,14 +1,13 @@
-import { db } from '../../config/firebase';
+import { db, admin } from '../../config/firebase';
 import { NotFoundError, BadRequestError, ConflictError, UnauthorizedError } from '../../lib/errors';
 import { activitiesService, ActivityDocument } from '../activities/activities.service';
 import { questionsService } from '../questions/questions.service';
 import { participantsService, ParticipantDocument } from '../participants/participants.service';
 import { ParticipantInput } from '../participants/participants.schema';
 import { SubmitAnswerInput, SanitizedQuestion } from './attempts.schema';
-import { calculateQuestionScore, calculateAttemptScores, ScoringQuestion, calculateFinalScore } from '../../lib/scoring';
+import { calculateQuestionScore, calculateAttemptScores, ScoringQuestion, calculateFinalScore, compareLeaderboardEntries, LeaderboardRankable } from '../../lib/scoring';
 import { generateSecureToken, hashTokenSha256, timingSafeEqualString } from '../../lib/hash';
 import { getClock } from '../../lib/clock';
-import { leaderboardService } from '../leaderboard/leaderboard.service';
 
 export interface SnapshotChoice {
   id: string;
@@ -49,31 +48,24 @@ export interface QuestionStateDocument {
   enterCount: number;
 }
 
-export interface QuestionSnapshot {
-  questionId: string;
-  weight: number;
-  type: string;
-  speedBonusEnabled: boolean;
-  speedBonusPercent: number;
-  timeReferenceSeconds: number;
-  correctChoiceIds: string[];
-  choiceIds: string[];
-}
-
 export interface AttemptDocument {
   id: string;
   activityId: string;
   participantId: string;
+  participantCode?: string;
+  displayName: string;
   status: 'in_progress' | 'completed' | 'abandoned' | 'expired';
   startedAt: string;
   completedAt: string | null;
   lastAnswerAt?: string | null;
   finalScore: number;
+  scorePercent?: number;
   leaderboardPoints: number;
   durationMs: number;
+  answeredCount: number;
+  earnedWeight: number;
   attemptTokenHash: string;
   scoringVersion: number;
-  questionSnapshots?: QuestionSnapshot[];
   createdAt: string;
   updatedAt: string;
 }
@@ -96,6 +88,7 @@ export class AttemptsService {
   private answersCol = db.collection('answers');
   private snapshotsCol = db.collection('attemptSnapshots');
   private questionStatesCol = db.collection('questionStates');
+  private leaderboardMetaCol = db.collection('leaderboardSnapshots');
 
   verifyToken(attempt: AttemptDocument, token?: string, isOperator = false): void {
     if (isOperator) return;
@@ -155,18 +148,6 @@ export class AttemptsService {
     const docRef = this.col.doc();
     const attemptId = docRef.id;
 
-    // Build QuestionSnapshots
-    const legacySnapshots: QuestionSnapshot[] = liveQuestions.map((q) => ({
-      questionId: q.id,
-      weight: q.weight,
-      type: q.type,
-      speedBonusEnabled: q.speedBonusEnabled,
-      speedBonusPercent: q.speedBonusPercent,
-      timeReferenceSeconds: q.timeReferenceSeconds,
-      correctChoiceIds: q.choices.filter((c) => c.isCorrect).map((c) => c.id),
-      choiceIds: q.choices.map((c) => c.id),
-    }));
-
     // Build AttemptSnapshotDocument
     const snapshotQuestions: SnapshotQuestion[] = liveQuestions.map((q) => ({
       questionId: q.id,
@@ -176,12 +157,12 @@ export class AttemptsService {
       type: q.type,
       imagePath: q.imagePath || null,
       comparisonKey: q.comparisonKey || null,
-      weight: q.weight,
-      speedBonusEnabled: q.speedBonusEnabled,
-      speedBonusPercent: q.speedBonusPercent,
-      timeReferenceSeconds: q.timeReferenceSeconds,
-      correctChoiceIds: q.choices.filter((c) => c.isCorrect).map((c) => c.id),
-      choices: q.choices.map((c) => ({
+      weight: q.weight > 0 ? q.weight : 1,
+      speedBonusEnabled: !!q.speedBonusEnabled,
+      speedBonusPercent: q.speedBonusPercent ?? 20,
+      timeReferenceSeconds: q.timeReferenceSeconds ?? 30,
+      correctChoiceIds: (q.choices || []).filter((c) => c.isCorrect).map((c) => c.id),
+      choices: (q.choices || []).map((c) => ({
         id: c.id,
         body: c.body,
         position: c.position,
@@ -193,16 +174,20 @@ export class AttemptsService {
       id: attemptId,
       activityId: activity.id,
       participantId: participant.id,
+      participantCode: participant.participantCode || '',
+      displayName: participant.name,
       status: 'in_progress',
       startedAt: now,
       completedAt: null,
       lastAnswerAt: null,
       finalScore: 0,
+      scorePercent: 0,
       leaderboardPoints: 0,
       durationMs: 0,
+      answeredCount: 0,
+      earnedWeight: 0,
       attemptTokenHash,
       scoringVersion: 2,
-      questionSnapshots: legacySnapshots,
       createdAt: now,
       updatedAt: now,
     };
@@ -215,8 +200,9 @@ export class AttemptsService {
       snapshotCreatedAt: now,
     };
 
-    // First question marker
-    const firstQ = snapshotQuestions[0];
+    // First question marker (find question with lowest position)
+    const sortedQuestions = [...snapshotQuestions].sort((a, b) => a.position - b.position);
+    const firstQ = sortedQuestions[0];
     const firstQMarkerRef = this.questionStatesCol.doc(`${attemptId}_${firstQ.questionId}`);
 
     const batch = db.batch();
@@ -229,6 +215,21 @@ export class AttemptsService {
       lastEnteredAt: now,
       enterCount: 1,
     });
+
+    // Update meta doc with participant count increment
+    batch.set(
+      this.leaderboardMetaCol.doc(activity.id),
+      {
+        activityId: activity.id,
+        slug: activity.slug,
+        state: 'live',
+        status: activity.status,
+        visibleToParticipants: !activity.settings?.hideLeaderboardFromParticipants,
+        updatedAt: now,
+        participantCount: admin.firestore.FieldValue.increment(1),
+      },
+      { merge: true }
+    );
 
     await batch.commit();
 
@@ -300,61 +301,17 @@ export class AttemptsService {
     input: SubmitAnswerInput,
     token?: string
   ): Promise<{ recorded: boolean; questionId: string }> {
-    const attemptDoc = await this.col.doc(attemptId).get();
-    if (!attemptDoc.exists) throw new NotFoundError(`Attempt '${attemptId}' not found`);
-    const attempt = attemptDoc.data() as AttemptDocument;
-    this.verifyToken(attempt, token);
-
-    if (attempt.status !== 'in_progress') {
-      throw new BadRequestError('Attempt is not in progress', 'ATTEMPT_NOT_IN_PROGRESS');
-    }
-
-    const activity = await activitiesService.getById(attempt.activityId);
-    if (activitiesService.isEffectiveClosed(activity)) {
-      throw new BadRequestError('Activity has closed', 'ACTIVITY_CLOSED');
-    }
-
-    const answerId = `${attemptId}_${input.questionId}`;
-    const answerRef = this.answersCol.doc(answerId);
-
-    const existingAns = await answerRef.get();
-    if (existingAns.exists) {
-      throw new ConflictError('Question has already been answered', 'ALREADY_ANSWERED');
-    }
-
-    // Load question from attempt snapshot
+    const attemptRef = this.col.doc(attemptId);
     const snapDoc = await this.snapshotsCol.doc(attemptId).get();
-    let qSnap: SnapshotQuestion | undefined;
-    let totalQuestionsCount = 0;
-    let totalAvailableWeight = 0;
-
-    if (snapDoc.exists) {
-      const snapData = snapDoc.data() as AttemptSnapshotDocument;
-      qSnap = snapData.questions.find((q) => q.questionId === input.questionId);
-      totalQuestionsCount = snapData.questions.length;
-      totalAvailableWeight = snapData.questions.reduce((sum, q) => sum + (q.weight > 0 ? q.weight : 1), 0);
-    } else if (attempt.questionSnapshots) {
-      const leg = attempt.questionSnapshots.find((q) => q.questionId === input.questionId);
-      if (leg) {
-        qSnap = {
-          questionId: leg.questionId,
-          position: 0,
-          body: '',
-          bodyText: '',
-          type: leg.type,
-          weight: leg.weight,
-          speedBonusEnabled: leg.speedBonusEnabled,
-          speedBonusPercent: leg.speedBonusPercent,
-          timeReferenceSeconds: leg.timeReferenceSeconds,
-          correctChoiceIds: leg.correctChoiceIds,
-          choices: leg.choiceIds.map((id) => ({ id, body: '', position: 0, isCorrect: leg.correctChoiceIds.includes(id) })),
-        };
-      }
-      totalQuestionsCount = attempt.questionSnapshots.length;
-      totalAvailableWeight = attempt.questionSnapshots.reduce((sum, q) => sum + (q.weight > 0 ? q.weight : 1), 0);
+    if (!snapDoc.exists) {
+      throw new NotFoundError(`Attempt snapshot not found for '${attemptId}'`);
     }
 
-    if (!qSnap) throw new BadRequestError('Question not part of this attempt');
+    const snapData = snapDoc.data() as AttemptSnapshotDocument;
+    const qSnap = snapData.questions.find((q) => q.questionId === input.questionId);
+    if (!qSnap) {
+      throw new BadRequestError('Question not part of this attempt');
+    }
 
     const validChoiceIds = new Set(qSnap.choices.map((c) => c.id));
     if (!input.selectedChoiceIds.every((id) => validChoiceIds.has(id))) {
@@ -367,148 +324,206 @@ export class AttemptsService {
       throw new BadRequestError('Single choice question cannot have multiple selections');
     }
 
-    // Server-authoritative timing via questionStates marker
-    const markerDoc = await this.questionStatesCol.doc(`${attemptId}_${input.questionId}`).get();
+    const totalQuestionsCount = snapData.questions.length;
+    const totalAvailableWeight = snapData.questions.reduce((sum, q) => sum + (q.weight > 0 ? q.weight : 1), 0);
+
+    const answerId = `${attemptId}_${input.questionId}`;
+    const answerRef = this.answersCol.doc(answerId);
+    const markerRef = this.questionStatesCol.doc(`${attemptId}_${input.questionId}`);
+
     const serverReceivedAt = getClock().nowIso();
     const nowMs = new Date(serverReceivedAt).getTime();
 
-    let officialDurationMs = 0;
-    let timingSource: 'server_marker' | 'missing_marker' = 'server_marker';
+    await db.runTransaction(async (t) => {
+      const attemptDoc = await t.get(attemptRef);
+      if (!attemptDoc.exists) throw new NotFoundError(`Attempt '${attemptId}' not found`);
+      const attempt = attemptDoc.data() as AttemptDocument;
+      this.verifyToken(attempt, token);
 
-    if (markerDoc.exists) {
-      const markerData = markerDoc.data() as QuestionStateDocument;
-      const firstEnteredAtMs = new Date(markerData.firstEnteredAt).getTime();
-      officialDurationMs = Math.max(0, nowMs - firstEnteredAtMs);
-      timingSource = 'server_marker';
-    } else {
-      // Requirement H4: Answer without reveal marker
-      // correctness scored, speed bonus = 0, timingSource = "missing_marker"
-      // Do not synthesize a zero duration
-      const startedAtMs = new Date(attempt.startedAt).getTime();
-      officialDurationMs = Math.max(0, nowMs - startedAtMs);
-      timingSource = 'missing_marker';
-    }
-
-    const scored = calculateQuestionScore(
-      {
-        id: qSnap.questionId,
-        weight: qSnap.weight,
-        speedBonusEnabled: timingSource === 'server_marker' ? qSnap.speedBonusEnabled : false,
-        speedBonusPercent: qSnap.speedBonusPercent,
-        timeReferenceSeconds: qSnap.timeReferenceSeconds,
-        correctChoiceIds: qSnap.correctChoiceIds,
-      },
-      {
-        questionId: input.questionId,
-        selectedChoiceIds: input.selectedChoiceIds,
-        enteredAt: input.enteredAt || attempt.startedAt,
-        answeredAt: input.answeredAt || serverReceivedAt,
-        durationMs: officialDurationMs,
+      if (attempt.status !== 'in_progress') {
+        throw new BadRequestError('Attempt is not in progress', 'ATTEMPT_NOT_IN_PROGRESS');
       }
-    );
 
-    if (timingSource === 'missing_marker') {
-      scored.speedBonus = 0;
-      scored.leaderboardPoints = scored.earnedWeight;
-    }
+      const activity = await activitiesService.getById(attempt.activityId);
+      if (activitiesService.isEffectiveClosed(activity)) {
+        throw new BadRequestError('Activity has closed', 'ACTIVITY_CLOSED');
+      }
 
-    const answerData = {
-      id: answerId,
-      attemptId,
-      activityId: attempt.activityId,
-      questionId: input.questionId,
-      selectedChoiceIds: input.selectedChoiceIds,
-      isCorrect: scored.isCorrect,
-      serverReceivedAt,
-      clientEnteredAt: input.enteredAt || null,
-      clientAnsweredAt: input.answeredAt || null,
-      durationMs: officialDurationMs,
-      earnedWeight: scored.earnedWeight,
-      speedBonus: scored.speedBonus,
-      leaderboardPoints: scored.leaderboardPoints,
-      changeCount: input.changeCount || 0,
-      timingSource,
-    };
+      const existingAns = await t.get(answerRef);
+      if (existingAns.exists) {
+        throw new ConflictError('Question has already been answered', 'ALREADY_ANSWERED');
+      }
 
-    await answerRef.set(answerData);
+      // Read question enter marker
+      const markerDoc = await t.get(markerRef);
+      let officialDurationMs = 0;
+      let timingSource: 'server_marker' | 'missing_marker' = 'server_marker';
 
-    // Compute running totals for attempt
-    const answersSnap = await this.answersCol.where('attemptId', '==', attemptId).get();
-    let runningPoints = 0;
-    let runningEarnedWeight = 0;
-    let runningDurationMs = 0;
+      if (markerDoc.exists) {
+        const markerData = markerDoc.data() as QuestionStateDocument;
+        const firstEnteredAtMs = new Date(markerData.firstEnteredAt).getTime();
+        officialDurationMs = Math.max(0, nowMs - firstEnteredAtMs);
+        timingSource = 'server_marker';
+      } else {
+        // Missing marker: speedBonus = 0, timingSource = "missing_marker"
+        const startedAtMs = new Date(attempt.startedAt).getTime();
+        officialDurationMs = Math.max(0, nowMs - startedAtMs);
+        timingSource = 'missing_marker';
+      }
 
-    answersSnap.docs.forEach((doc) => {
-      const a = doc.data();
-      runningPoints = Number((runningPoints + (Number(a.leaderboardPoints) || 0)).toFixed(2));
-      runningEarnedWeight += Number(a.earnedWeight) || 0;
-      runningDurationMs += Number(a.durationMs) || 0;
-    });
+      const scored = calculateQuestionScore(
+        {
+          id: qSnap.questionId,
+          weight: qSnap.weight,
+          speedBonusEnabled: timingSource === 'server_marker' ? qSnap.speedBonusEnabled : false,
+          speedBonusPercent: qSnap.speedBonusPercent,
+          timeReferenceSeconds: qSnap.timeReferenceSeconds,
+          correctChoiceIds: qSnap.correctChoiceIds,
+        },
+        {
+          questionId: input.questionId,
+          selectedChoiceIds: input.selectedChoiceIds,
+          enteredAt: input.enteredAt || attempt.startedAt,
+          answeredAt: input.answeredAt || serverReceivedAt,
+          durationMs: officialDurationMs,
+        }
+      );
 
-    const scorePercent = calculateFinalScore(runningEarnedWeight, totalAvailableWeight || 1);
+      if (timingSource === 'missing_marker') {
+        scored.speedBonus = 0;
+        scored.leaderboardPoints = scored.earnedWeight;
+      }
 
-    await this.col.doc(attemptId).update({
-      leaderboardPoints: runningPoints,
-      finalScore: scorePercent,
-      durationMs: runningDurationMs,
-      lastAnswerAt: serverReceivedAt,
-      updatedAt: serverReceivedAt,
-    });
+      const selectedChoiceBodies = qSnap.choices
+        .filter((c) => input.selectedChoiceIds.includes(c.id))
+        .map((c) => c.body);
 
-    // Update live leaderboard entry
-    try {
-      const participant = await participantsService.getById(attempt.participantId);
-      await leaderboardService.recordEntry(attempt.activityId, {
+      const answerData = {
+        id: answerId,
         attemptId,
-        participantId: attempt.participantId,
-        participantCode: participant.participantCode || null,
-        displayName: participant.name,
+        activityId: attempt.activityId,
+        questionId: input.questionId,
+        questionBody: qSnap.body,
+        selectedChoiceIds: input.selectedChoiceIds,
+        selectedChoiceBodies,
+        isCorrect: scored.isCorrect,
+        serverReceivedAt,
+        clientEnteredAt: input.enteredAt || null,
+        clientAnsweredAt: input.answeredAt || null,
+        durationMs: officialDurationMs,
+        earnedWeight: scored.earnedWeight,
+        speedBonus: scored.speedBonus,
+        leaderboardPoints: scored.leaderboardPoints,
+        changeCount: input.changeCount || 0,
+        timingSource,
+      };
+
+      const newAnsweredCount = (attempt.answeredCount || 0) + 1;
+      const newEarnedWeight = (attempt.earnedWeight || 0) + scored.earnedWeight;
+      const newPoints = Number(((attempt.leaderboardPoints || 0) + scored.leaderboardPoints).toFixed(2));
+      const newDurationMs = (attempt.durationMs || 0) + officialDurationMs;
+      const newScorePercent = calculateFinalScore(newEarnedWeight, totalAvailableWeight || 1);
+
+      const candidateRankable: LeaderboardRankable = {
+        attemptId,
+        leaderboardPoints: newPoints,
+        scorePercent: newScorePercent,
+        durationMs: newDurationMs,
         status: 'in_progress',
-        locked: false,
-        leaderboardPoints: runningPoints,
-        scorePercent,
-        finalScore: scorePercent,
-        answeredCount: answersSnap.size,
-        totalQuestions: totalQuestionsCount,
-        durationMs: runningDurationMs,
         rankTimeAt: serverReceivedAt,
+      };
+
+      let shouldUpdateLeaderboard = true;
+      let previousEntryIdToDelete: string | null = null;
+
+      if (attempt.participantCode) {
+        const siblingAttemptsSnap = await t.get(
+          this.col
+            .where('activityId', '==', attempt.activityId)
+            .where('participantId', '==', attempt.participantId)
+        );
+
+        for (const sDoc of siblingAttemptsSnap.docs) {
+          if (sDoc.id === attemptId) continue;
+          const sData = sDoc.data() as AttemptDocument;
+          if (sData.status !== 'completed' && sData.status !== 'in_progress') continue;
+
+          const siblingRankable: LeaderboardRankable = {
+            attemptId: sData.id,
+            leaderboardPoints: sData.leaderboardPoints || 0,
+            scorePercent: sData.scorePercent ?? sData.finalScore ?? 0,
+            durationMs: sData.durationMs || 0,
+            status: sData.status,
+            rankTimeAt: sData.status === 'completed' ? (sData.completedAt || sData.lastAnswerAt) : (sData.lastAnswerAt || sData.startedAt),
+          };
+
+          if (compareLeaderboardEntries(siblingRankable, candidateRankable) < 0) {
+            shouldUpdateLeaderboard = false;
+            break;
+          } else {
+            previousEntryIdToDelete = sData.id;
+          }
+        }
+      }
+
+      // Write answer doc
+      t.set(answerRef, answerData);
+
+      // Update attempt running aggregates
+      t.update(attemptRef, {
+        answeredCount: newAnsweredCount,
+        earnedWeight: newEarnedWeight,
+        leaderboardPoints: newPoints,
+        durationMs: newDurationMs,
+        finalScore: newScorePercent,
+        scorePercent: newScorePercent,
         lastAnswerAt: serverReceivedAt,
-        completedAt: null,
+        updatedAt: serverReceivedAt,
       });
-    } catch (_e) {
-      // Non-fatal if participant lookup fails
-    }
+
+      if (shouldUpdateLeaderboard) {
+        if (previousEntryIdToDelete) {
+          const oldEntryRef = db
+            .collection('leaderboardSnapshots')
+            .doc(attempt.activityId)
+            .collection('entries')
+            .doc(previousEntryIdToDelete);
+          t.delete(oldEntryRef);
+        }
+
+        // Update leaderboard entry in same transaction
+        const entryRef = db
+          .collection('leaderboardSnapshots')
+          .doc(attempt.activityId)
+          .collection('entries')
+          .doc(attemptId);
+
+        t.set(entryRef, {
+          attemptId,
+          displayName: attempt.displayName || 'Anonymous',
+          status: 'in_progress',
+          locked: false,
+          leaderboardPoints: newPoints,
+          scorePercent: newScorePercent,
+          answeredCount: newAnsweredCount,
+          totalQuestions: totalQuestionsCount,
+          durationMs: newDurationMs,
+          lastAnswerAt: serverReceivedAt,
+          completedAt: null,
+          rankTimeAt: serverReceivedAt,
+        });
+      }
+    });
 
     return { recorded: true, questionId: input.questionId };
   }
 
   async finishAttempt(attemptId: string, token?: string): Promise<{ attempt: any; summary: any }> {
-    const attemptDoc = await this.col.doc(attemptId).get();
-    if (!attemptDoc.exists) throw new NotFoundError(`Attempt '${attemptId}' not found`);
-    const attempt = attemptDoc.data() as AttemptDocument;
-    this.verifyToken(attempt, token);
-
-    if (attempt.status === 'completed') {
-      return { attempt: sanitizeAttempt(attempt), summary: { finalScore: attempt.finalScore, totalLeaderboardPoints: attempt.leaderboardPoints } };
-    }
-
-    const activity = await activitiesService.getById(attempt.activityId);
-    const nowMs = getClock().now().getTime();
-    const closesAtMs = new Date(activity.closesAt).getTime();
-    const graceMs = (activity.settings?.finishGraceSeconds ?? 120) * 1000;
-
-    if (nowMs > closesAtMs + graceMs) {
-      throw new BadRequestError('Finish grace window has expired', 'ACTIVITY_CLOSED');
-    }
-
-    const answersSnap = await this.answersCol.where('attemptId', '==', attemptId).get();
-    const answers = answersSnap.docs.map((d) => d.data() as any);
-
-    // Load from snapshot
-    let scoringQuestions: ScoringQuestion[] = [];
-    let totalQuestionsCount = 0;
-
+    const attemptRef = this.col.doc(attemptId);
     const snapDoc = await this.snapshotsCol.doc(attemptId).get();
+    let totalQuestionsCount = 0;
+    let scoringQuestions: ScoringQuestion[] = [];
+
     if (snapDoc.exists) {
       const snapData = snapDoc.data() as AttemptSnapshotDocument;
       scoringQuestions = snapData.questions.map((q) => ({
@@ -520,57 +535,145 @@ export class AttemptsService {
         correctChoiceIds: q.correctChoiceIds,
       }));
       totalQuestionsCount = snapData.questions.length;
-    } else if (attempt.questionSnapshots) {
-      scoringQuestions = attempt.questionSnapshots.map((q) => ({
-        id: q.questionId,
-        weight: q.weight,
-        speedBonusEnabled: q.speedBonusEnabled,
-        speedBonusPercent: q.speedBonusPercent,
-        timeReferenceSeconds: q.timeReferenceSeconds,
-        correctChoiceIds: q.correctChoiceIds,
-      }));
-      totalQuestionsCount = attempt.questionSnapshots.length;
     }
+
+    const answersSnap = await this.answersCol.where('attemptId', '==', attemptId).get();
+    const answers = answersSnap.docs.map((doc) => {
+      const d = doc.data();
+      return {
+        questionId: d.questionId,
+        selectedChoiceIds: d.selectedChoiceIds,
+        enteredAt: d.serverReceivedAt,
+        answeredAt: d.serverReceivedAt,
+        durationMs: d.durationMs,
+      };
+    });
 
     const outcome = calculateAttemptScores(scoringQuestions, answers);
     const completedAt = getClock().nowIso();
 
-    const updatedData = {
-      status: 'completed' as const,
-      completedAt,
-      finalScore: outcome.finalScore,
-      leaderboardPoints: outcome.totalLeaderboardPoints,
-      durationMs: outcome.totalDurationMs,
-      updatedAt: completedAt,
-    };
+    let finalAttempt: AttemptDocument | null = null;
 
-    await this.col.doc(attemptId).update(updatedData);
+    await db.runTransaction(async (t) => {
+      const attemptDoc = await t.get(attemptRef);
+      if (!attemptDoc.exists) throw new NotFoundError(`Attempt '${attemptId}' not found`);
+      const attempt = attemptDoc.data() as AttemptDocument;
+      this.verifyToken(attempt, token);
 
-    try {
-      const participant = await participantsService.getById(attempt.participantId);
-      await leaderboardService.recordEntry(attempt.activityId, {
+      if (attempt.status !== 'in_progress') {
+        throw new BadRequestError('Attempt is not in progress', 'ATTEMPT_NOT_IN_PROGRESS');
+      }
+
+      const activity = await activitiesService.getById(attempt.activityId);
+      if (activitiesService.isEffectiveClosed(activity)) {
+        throw new BadRequestError('Finish grace window has expired', 'ACTIVITY_CLOSED');
+      }
+
+      const updatedData = {
+        status: 'completed' as const,
+        completedAt,
+        finalScore: outcome.finalScore,
+        scorePercent: outcome.finalScore,
+        leaderboardPoints: outcome.totalLeaderboardPoints,
+        durationMs: outcome.totalDurationMs,
+        lastAnswerAt: completedAt,
+        updatedAt: completedAt,
+      };
+
+      const candidateRankable: LeaderboardRankable = {
         attemptId,
-        participantId: attempt.participantId,
-        participantCode: participant.participantCode || null,
-        displayName: participant.name,
-        status: 'completed',
-        locked: true,
         leaderboardPoints: outcome.totalLeaderboardPoints,
         scorePercent: outcome.finalScore,
-        finalScore: outcome.finalScore,
-        answeredCount: answers.length,
-        totalQuestions: totalQuestionsCount,
         durationMs: outcome.totalDurationMs,
+        status: 'completed',
         rankTimeAt: completedAt,
-        lastAnswerAt: attempt.lastAnswerAt || completedAt,
-        completedAt,
-      });
-    } catch (_e) {
-      // Non-fatal
-    }
+      };
 
-    const finalAttempt: AttemptDocument = { ...attempt, ...updatedData };
-    return { attempt: sanitizeAttempt(finalAttempt, false), summary: outcome };
+      let shouldUpdateLeaderboard = true;
+      let previousEntryIdToDelete: string | null = null;
+
+      if (attempt.participantCode) {
+        const siblingAttemptsSnap = await t.get(
+          this.col
+            .where('activityId', '==', attempt.activityId)
+            .where('participantId', '==', attempt.participantId)
+        );
+
+        for (const sDoc of siblingAttemptsSnap.docs) {
+          if (sDoc.id === attemptId) continue;
+          const sData = sDoc.data() as AttemptDocument;
+          if (sData.status !== 'completed' && sData.status !== 'in_progress') continue;
+
+          const siblingRankable: LeaderboardRankable = {
+            attemptId: sData.id,
+            leaderboardPoints: sData.leaderboardPoints || 0,
+            scorePercent: sData.scorePercent ?? sData.finalScore ?? 0,
+            durationMs: sData.durationMs || 0,
+            status: sData.status,
+            rankTimeAt: sData.status === 'completed' ? (sData.completedAt || sData.lastAnswerAt) : (sData.lastAnswerAt || sData.startedAt),
+          };
+
+          if (compareLeaderboardEntries(siblingRankable, candidateRankable) < 0) {
+            shouldUpdateLeaderboard = false;
+            break;
+          } else {
+            previousEntryIdToDelete = sData.id;
+          }
+        }
+      }
+
+      t.update(attemptRef, updatedData);
+
+      if (shouldUpdateLeaderboard) {
+        if (previousEntryIdToDelete) {
+          const oldEntryRef = db
+            .collection('leaderboardSnapshots')
+            .doc(attempt.activityId)
+            .collection('entries')
+            .doc(previousEntryIdToDelete);
+          t.delete(oldEntryRef);
+        }
+
+        const entryRef = db
+          .collection('leaderboardSnapshots')
+          .doc(attempt.activityId)
+          .collection('entries')
+          .doc(attemptId);
+
+        t.set(
+          entryRef,
+          {
+            attemptId,
+            displayName: attempt.displayName || 'Anonymous',
+            status: 'completed',
+            locked: true,
+            leaderboardPoints: outcome.totalLeaderboardPoints,
+            scorePercent: outcome.finalScore,
+            answeredCount: answers.length,
+            totalQuestions: totalQuestionsCount,
+            durationMs: outcome.totalDurationMs,
+            lastAnswerAt: completedAt,
+            completedAt,
+            rankTimeAt: completedAt,
+          },
+          { merge: true }
+        );
+      }
+
+      finalAttempt = { ...attempt, ...updatedData };
+    });
+
+    const publicSummary = {
+      totalWeight: outcome.totalWeight,
+      earnedWeight: outcome.earnedWeight,
+      finalScore: outcome.finalScore,
+      totalLeaderboardPoints: outcome.totalLeaderboardPoints,
+      totalDurationMs: outcome.totalDurationMs,
+      correctCount: outcome.correctCount,
+      totalQuestions: outcome.totalQuestions,
+    };
+
+    return { attempt: sanitizeAttempt(finalAttempt!, false), summary: publicSummary };
   }
 
   async getById(id: string, token?: string, isOperator = false): Promise<any> {
@@ -582,17 +685,9 @@ export class AttemptsService {
   }
 }
 
-export function sanitizeAttempt(attempt: AttemptDocument, isOperator = false): any {
-  const { attemptTokenHash, questionSnapshots, ...rest } = attempt;
-  const safeSnapshots = (questionSnapshots || []).map((q) => {
-    if (isOperator) return q;
-    const { correctChoiceIds, ...safeQ } = q;
-    return safeQ;
-  });
-  return {
-    ...rest,
-    ...(questionSnapshots ? { questionSnapshots: safeSnapshots } : {}),
-  };
+export function sanitizeAttempt(attempt: AttemptDocument, _isOperator = false): any {
+  const { attemptTokenHash, ...rest } = attempt;
+  return rest;
 }
 
 export const attemptsService = new AttemptsService();

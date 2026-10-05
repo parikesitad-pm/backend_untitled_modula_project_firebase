@@ -90,17 +90,15 @@ describe('Functions-Emulator Smoke Test Suite', () => {
     expect(res.body.data.status).toBe('published');
   });
 
-  it('5. participant inspects public activity without answer leaks', async () => {
+  it('5. participant inspects public activity metadata without question bodies or leaks', async () => {
     const res = await api.get(`/api/public/${testSlug}`);
     expect(res.status).toBe(200);
     expect(res.body.data.activity.title).toBe('Smoke Test Assessment');
-    expect(res.body.data.questions.length).toBe(1);
-    for (const choice of res.body.data.questions[0].choices) {
-      expect(choice).not.toHaveProperty('isCorrect');
-    }
+    expect(res.body.data.questionCount).toBe(1);
+    expect(res.body.data.questions).toBeUndefined();
   });
 
-  it('6. participant starts attempt and receives attemptToken', async () => {
+  it('6. participant starts attempt, receives attemptToken and first question reveal', async () => {
     const res = await api
       .post(`/api/public/${testSlug}/start`)
       .send({
@@ -111,12 +109,26 @@ describe('Functions-Emulator Smoke Test Suite', () => {
     expect(res.status).toBe(201);
     expect(res.body.data.attempt.status).toBe('in_progress');
     expect(res.body.data.attemptToken).toBeDefined();
+    expect(res.body.data.firstQuestion.id).toBe(questionId);
+    expect(res.body.data.firstQuestion.choices.length).toBe(2);
+    for (const choice of res.body.data.firstQuestion.choices) {
+      expect(choice).not.toHaveProperty('isCorrect');
+    }
 
     attemptId = res.body.data.attempt.id;
     attemptToken = res.body.data.attemptToken;
   });
 
-  it('7. submits answer with X-Attempt-Token', async () => {
+  it('7. participant records enter marker for question', async () => {
+    const res = await api
+      .post(`/api/attempts/${attemptId}/questions/${questionId}/enter`)
+      .set('X-Attempt-Token', attemptToken);
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.question.id).toBe(questionId);
+  });
+
+  it('8. submits answer with X-Attempt-Token', async () => {
     const res = await api
       .post(`/api/attempts/${attemptId}/answers`)
       .set('X-Attempt-Token', attemptToken)
@@ -130,7 +142,20 @@ describe('Functions-Emulator Smoke Test Suite', () => {
     expect(res.body.data.recorded).toBe(true);
   });
 
-  it('8. finishes attempt with X-Attempt-Token and computes score', async () => {
+  it('9. live leaderboard reflects provisional points before finish', async () => {
+    const res = await api.get(`/api/leaderboards/${testSlug}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.state).toBe('live');
+    expect(res.body.data.top5.length).toBe(1);
+    const entry = res.body.data.top5[0];
+    expect(entry.displayName).toBe('Smoke Tester');
+    expect(entry.status).toBe('in_progress');
+    expect(entry.locked).toBe(false);
+    expect(entry.rank).toBe(1);
+    expect(entry.leaderboardPoints).toBeGreaterThan(0);
+  });
+
+  it('10. finishes attempt with X-Attempt-Token and locks leaderboard entry', async () => {
     const res = await api
       .post(`/api/attempts/${attemptId}/finish`)
       .set('X-Attempt-Token', attemptToken);
@@ -138,17 +163,26 @@ describe('Functions-Emulator Smoke Test Suite', () => {
     expect(res.body.data.summary.finalScore).toBe(100);
     expect(res.body.data.summary.correctCount).toBe(1);
     expect(res.body.data.summary.totalLeaderboardPoints).toBeGreaterThan(2);
+
+    const lbRes = await api.get(`/api/leaderboards/${testSlug}`);
+    expect(lbRes.status).toBe(200);
+    expect(lbRes.body.data.top5[0].locked).toBe(true);
+    expect(lbRes.body.data.top5[0].status).toBe('completed');
   });
 
-  it('9. retrieves realtime leaderboard rankings', async () => {
-    const res = await api.get(`/api/leaderboards/${testSlug}`);
-    expect(res.status).toBe(200);
-    expect(res.body.data.top5.length).toBe(1);
-    expect(res.body.data.top5[0].displayName).toBe('Smoke Tester');
-    expect(res.body.data.top5[0].finalScore).toBe(100);
+  it('11. closes activity and transitions leaderboard to final state', async () => {
+    const closeRes = await api
+      .post(`/api/activities/${activityId}/close`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+    expect(closeRes.status).toBe(200);
+    expect(closeRes.body.data.status).toBe('closed');
+
+    const lbRes = await api.get(`/api/leaderboards/${testSlug}`);
+    expect(lbRes.status).toBe(200);
+    expect(lbRes.body.data.state).toBe('final');
   });
 
-  it('10. organizer inspects stats summary', async () => {
+  it('12. organizer inspects stats summary', async () => {
     const res = await api
       .get(`/api/activities/${activityId}/stats`)
       .set('Authorization', `Bearer ${ownerToken}`);

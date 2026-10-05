@@ -49,7 +49,7 @@ Participants in the Participant Area are anonymous, so sequential or known `atte
 5. **Participant Code Normalization**: All participant codes are trimmed, uppercased, and collapsed of redundant whitespace prior to indexing or queries.
 6. **Max Attempts Guard**: `settings.maxAttempts` (default: 1) is enforced inside an atomic Firestore transaction. Over-limit submissions return `409 Conflict` (`MAX_ATTEMPTS_REACHED`).
 
-### Role Authorization Matrix
+### Role Authorization Matrix & Firestore Role Authority
 MODULA enforces a single organization model with a strict role hierarchy (`operator < manager < owner < crown`) centralized in a single permission matrix (`functions/src/middleware/auth.middleware.ts`):
 
 | Capability | operator | manager | owner | crown |
@@ -63,9 +63,10 @@ MODULA enforces a single organization model with a strict role hierarchy (`opera
 | Hard-delete a draft activity | No | No | Yes | Yes |
 | Manage operators (`/api/operators/**`) | No | No | Yes | Yes |
 
-- Role claims are cryptographically verified via Firebase Auth custom claims and verified against the operator's active status in Firestore.
-- Deactivated operators have their Firebase refresh tokens immediately revoked via `auth.revokeRefreshTokens(uid)` and are blocked from all endpoints.
-- Role escalation rules: Operators can only create or promote users to roles **strictly below** their own level. The `crown` role can assign any role. No user can alter their own role.
+- **Firestore Role Authority**: While a Firebase ID token proves user identity (`uid`), it is **not** the authority for authorization roles. On every protected request, the server executes `auth.verifyIdToken(token, true)` with revocation check, loads the operator's record directly from the `operators` collection in Firestore, and enforces `role` and `active` status from that live record.
+- **Immediate Effect**: Role downgrades or account deactivations take effect immediately on the very next request, even with a previously issued, unexpired ID token.
+- **Informational Custom Claims**: Custom claims on tokens are maintained for frontend UI convenience only and are strictly ignored by server authorization guards.
+- **Role Escalation Rules**: Operators can only create or promote users to roles **strictly below** their own level. The `crown` role can assign any role. No operator can alter their own role.
 - **Last Owner Protection**: The system rejects deactivating or demoting the last remaining active `owner` or `crown` with `409 Conflict` (`LAST_OWNER_PROTECTION`).
 
 ### Login Hardening & Brute-Force Rate Limiting
@@ -76,12 +77,32 @@ MODULA enforces a single organization model with a strict role hierarchy (`opera
 - **Lockout Policy**: Defaults to 5 failures per 15-minute sliding window (configurable via `LOGIN_MAX_FAILURES` and `LOGIN_WINDOW_SECONDS`). Exceeding the threshold triggers `429 Too Many Requests` with a standard `Retry-After` header. Successful login immediately resets the failure counter.
 - Zero credential logging: passwords, access codes, tokens, and hashes are strictly excluded from server logs and API responses.
 
+### Firestore Collections Overview
+All Firestore data is structured across the following collections:
+
+| Collection Path | Purpose & Access |
+|---|---|
+| `activities` | Root activity documents (metadata, schedules, settings). Public reads when published/closed; operator-managed. |
+| `questions` | Question authoring documents for activities. Stripped of `isCorrect` on public read. |
+| `choices` | Choice authoring documents per question. Stripped of `isCorrect` on public read. |
+| `participants` | Participant identity registry (`name`, `participantCode`, `email`). Operator-only access. |
+| `attempts` | Attempt sessions with cryptographic token hash and running aggregates. |
+| `answers` | Immutable individual question answer records. Server-only direct access. |
+| `questionStates/{attemptId}_{questionId}` | Server-only enter markers tracking `firstEnteredAt`, `lastEnteredAt`, and `enterCount`. |
+| `attemptSnapshots/{attemptId}` | Server-only frozen copy of questions, choices, and scoring config captured at `POST /start`. |
+| `leaderboardSnapshots/{activityId}` | Meta document for activity leaderboard (`state`: `live \| final`, `participantCount`). |
+| `leaderboardSnapshots/{activityId}/entries/{attemptId}` | High-concurrency subcollection with one document per attempt. Zero PII. |
+| `statsSnapshots/{activityId}` | Aggregated statistics snapshot per activity. |
+| `activityGroupPhases/{groupId}_{phase}` | Atomic lock enforcing at most 1 `pre` and 1 `post` activity per pre/post group. |
+| `operators` | Operator accounts with bcrypt access code hash, role, and active status. Server-only access. |
+| `loginAttempts` | Server-only rate limiting failure records for operator authentication. |
+
 ### Firestore & Storage Security Rules
 - **Firestore Rules (`firestore.rules`)**:
   - Operators with verified auth tokens have read/write access according to server rules.
   - Direct client writes to activities, questions, attempts, answers, and operators are completely forbidden (`allow write: if false`).
-  - Public clients can only read `leaderboardSnapshots` if the parent activity is `published` or `closed` and `settings.leaderboardVisible` is `true`.
-  - All sensitive collections (`loginAttempts`, `operators`, `answers`, `participants`) deny all direct client access.
+  - Public clients can read `leaderboardSnapshots/{activityId}` and its subcollection `entries` only when the activity is `published` or `closed` AND `settings.hideLeaderboardFromParticipants` is false.
+  - All sensitive collections (`loginAttempts`, `operators`, `answers`, `participants`, `questionStates`, `attemptSnapshots`) deny all direct client access.
 - **Storage Rules (`storage.rules`)**:
   - Image uploads restricted to authenticated operators under `activities/{activityId}/questions/{questionId}/{imageId}`.
   - Content type restricted to `image/jpeg`, `image/png`, and `image/webp`. Maximum file size enforced at 5 MB.
@@ -91,14 +112,23 @@ MODULA enforces a single organization model with a strict role hierarchy (`opera
 
 ## 4. Scoring Model & Server-Authoritative Timing
 
-### Server-Authoritative Timing
-Client-side clocks cannot be trusted. MODULA enforces strict server-authoritative timing:
-1. **Server Timestamps**: Every submitted answer is stamped with `serverReceivedAt` by the server clock.
+### Per-Question Server Enter Markers (Scoring Version 2)
+To eliminate vulnerabilities caused by client-side clock tampering, skipping, or out-of-order answering:
+1. **Server Enter Marker Endpoint**: `POST /api/attempts/:attemptId/questions/:questionId/enter`.
+   - Requires valid `X-Attempt-Token`.
+   - Idempotent: First call records `firstEnteredAt` using the server clock. Subsequent calls increment `enterCount` and set `lastEnteredAt` without resetting `firstEnteredAt`.
+   - Markers are stored in server-only collection `questionStates/{attemptId}_{questionId}`.
+   - `POST /api/public/:slug/start` automatically records the enter marker for the first question (position 1).
+   - `enterCount > 1` is preserved as hidden server analytics (back-navigation counter) and never exposed to participants.
 2. **Official Question Duration Calculation**:
-   $$\text{durationMs} = \text{serverReceivedAt}_{\text{current}} - \max(\text{attempt.startedAt}, \text{serverReceivedAt}_{\text{previous}})$$
-   Clamped to $\ge 0$.
-3. **Telemetry Demotion**: Client-sent timestamps (`enteredAt`, `answeredAt`, `durationMs`) are preserved solely for diagnostic inspection as `clientEnteredAt`, `clientAnsweredAt`, and `clientDurationMs`. They have zero impact on score calculations.
-4. **Scoring Snapshot & Versioning**: Upon attempt creation, question weights, scoring rules, speed bonus parameters, and `scoringVersion: 1` are permanently snapshotted into the attempt document. Future edits to questions never mutate historical scores.
+   $$\text{durationMs} = \text{serverReceivedAt}_{\text{answer}} - \text{firstEnteredAt}_{\text{question}}$$
+   Guaranteed $\ge 0$ by construction.
+3. **Missing Enter Marker Fallback**:
+   If an answer arrives for a question without an enter marker (e.g. client bypassed enter endpoint), the answer is evaluated for correctness scoring, but receives **speed bonus 0** and is stamped with `timingSource: 'missing_marker'`. Answers with valid markers receive `timingSource: 'server_marker'`.
+4. **Telemetry Demotion**:
+   Client-sent timestamps (`enteredAt`, `answeredAt`) are stored solely as diagnostic metadata (`clientEnteredAt`, `clientAnsweredAt`). They are never used for official duration or speed bonus calculations.
+5. **Attempt-Level Question Snapshot**:
+   At `POST /start`, the entire question set (text, choices, weights, speed bonus settings, `timeReferenceSeconds`) is snapshotted into `attemptSnapshots/{attemptId}` with `scoringVersion: 2`. All subsequent question serving, answer scoring, and stat compilations read strictly from the snapshot. Cosmetic typo fixes to draft or live questions never mutate an in-progress or historical attempt.
 
 ### Speed Bonus & Final Score Calculation
 - **Correctness Score**:
@@ -107,39 +137,73 @@ Client-side clocks cannot be trusted. MODULA enforces strict server-authoritativ
 - **Leaderboard Points**:
   $$\text{leaderboardPoints} = \text{finalScore} + \sum \text{speedBonusPoints}$$
 
-### Attempt Expiration & Grace Window
-- Attempts allow question answers while the activity is open (`now < closesAt`).
+### Attempt Expiration & Lazy Finalization
+- Attempts accept answers while the activity is open (`now < closesAt`).
 - Once `closesAt` passes, new answers are immediately rejected.
-- To prevent network drop-outs from penalizing participants who answered all questions before closing, `POST /api/attempts/:id/finish` remains open for a configurable grace window of 120 seconds (`settings.finishGraceSeconds`). Beyond this window, finish requests return `400 Bad Request` (`ACTIVITY_CLOSED`).
+- A grace window of 120 seconds (`settings.finishGraceSeconds`) allows in-flight attempts to submit `POST /finish`.
+- Attempts remaining `in_progress` after `closesAt + finishGraceSeconds` become `expired`. Expired attempts are excluded from the ranked leaderboard and count as incomplete in Stats.
+- **Lazy Finalization**: No background cron or scheduled function is required. Finalization runs idempotently on `POST /api/activities/:id/close` and whenever leaderboard or stats are requested after the grace window. A second run changes nothing. When finalized, the leaderboard meta state is set to `'final'`.
 
 ---
 
-## 5. Realtime Leaderboard Architecture
+## 5. Live Realtime Leaderboard Architecture
 
-MODULA offers two distinct consumption paths for the Leaderboard:
+MODULA implements a high-concurrency, live provisional leaderboard architecture:
 
-### Path A: One-Shot REST API (Poll / Webhook)
-- **Endpoint**: `GET /api/leaderboards/:slug`
-- **Response**: High-level metadata, Top 5 highlighted participants, and a compact sorted participant list.
-- **Hidden Leaderboard**: When `settings.leaderboardVisible` is `false`, unauthenticated public requests receive `403 Forbidden` (`LEADERBOARD_HIDDEN`), while authenticated operators receive the full leaderboard.
+### Concepts & Subcollection Data Model
+To prevent write contention on a single hot document (Firestore sustains ~1 write/sec per document), the leaderboard is decoupled into:
+```text
+leaderboardSnapshots/{activityId}                      (small meta document, rarely written)
+leaderboardSnapshots/{activityId}/entries/{attemptId}  (one subcollection document per attempt)
+```
+- **Provisional Points**: On every accepted answer, the answer document, attempt running aggregates, and leaderboard entry are updated **in the same atomic Firestore transaction**. As a result, the live leaderboard updates before finish without lost updates.
+- **Final Result**: On `POST /finish`, the entry is updated with final scores and permanently locked (`locked: true`, `status: 'completed'`).
+- **Leaderboard State**: `state: 'live'` while the activity is open or attempts are in progress; transitions to `state: 'final'` upon lazy finalization.
 
-### Path B: Direct Firestore Realtime Listener (`onSnapshot`)
-For live reactive leaderboard displays (e.g., event projection screens):
-- **Document Path**: `leaderboardSnapshots/{activityId}`
+### Unified Ordering Comparator
+A single deterministic comparator is enforced across client queries, REST endpoints, rebuild routines, and tests:
+1. `leaderboardPoints` descending
+2. `scorePercent` descending
+3. `durationMs` ascending
+4. `lastAnswerAt` ascending (for completed entries: `completedAt`)
+5. `attemptId` ascending (stable tie-breaker)
+
+The required composite index is configured in `firestore.indexes.json` for collectionGroup `"entries"`.
+
+### Consumption Paths
+
+#### Path A: One-Shot REST API (Top-N & Poll)
+- **Endpoint**: `GET /api/leaderboards/:slug` (supports query param `?limit=50`)
+- **Response**: Meta document properties (`state`, `updatedAt`, `participantCount`), plus sorted `top5` and full entries with computed `rank` and `locked` flag.
+- **Hidden Leaderboard**: When `settings.hideLeaderboardFromParticipants` is `true`, unauthenticated public requests receive `403 Forbidden` (`LEADERBOARD_HIDDEN`), while authenticated operators receive full data.
+
+#### Path B: Direct Firestore Realtime Listener (`onSnapshot`)
+For zero-latency live projection displays:
+- **Collection Path**: `leaderboardSnapshots/{activityId}/entries`
 - **Frontend Code Example**:
   ```typescript
-  import { doc, onSnapshot } from 'firebase/firestore';
+  import { collection, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
   import { db } from './firebase-client';
 
-  const unsub = onSnapshot(doc(db, 'leaderboardSnapshots', activityId), (snapshot) => {
-    if (snapshot.exists()) {
-      const data = snapshot.data();
-      console.log('Top entries:', data.entries);
-    }
+  const entriesRef = collection(db, 'leaderboardSnapshots', activityId, 'entries');
+  const q = query(
+    entriesRef,
+    orderBy('leaderboardPoints', 'desc'),
+    orderBy('scorePercent', 'desc'),
+    orderBy('durationMs', 'asc'),
+    orderBy('lastAnswerAt', 'asc'),
+    orderBy('attemptId', 'asc'),
+    limit(50)
+  );
+
+  const unsub = onSnapshot(q, (snapshot) => {
+    snapshot.docChanges().forEach((change) => {
+      console.log('Leaderboard change:', change.type, change.doc.data());
+    });
   });
   ```
-- **Zero-PII Guarantee**: The snapshot document contains strictly sanitized display fields: `rank`, `displayName`, `finalScore`, `leaderboardPoints`, `durationMs`, and `completedAt`. Fields such as `participantCode`, `email`, `division`, and `customFields` are never included.
-- **Deterministic Rebuilding**: A service rebuild method (`leaderboardService.rebuildSnapshot(activityId)`) recomputes the snapshot from raw completed attempts to guarantee that `rebuilt == incremental`.
+- **Zero-PII Guarantee**: Entries strictly contain safe display data (`attemptId`, `displayName`, `status`, `locked`, `leaderboardPoints`, `scorePercent`, `answeredCount`, `totalQuestions`, `durationMs`, `lastAnswerAt`, `completedAt`). Never includes `participantCode`, `email`, `division`, `customFields`, or choice answers.
+- **Rebuild Routine**: Deterministic rebuild method `leaderboardService.rebuildLeaderboardSnapshot(activityId)` recalculates all entries from raw attempt and answer data, verifying that rebuilt data strictly equals incrementally maintained data.
 
 ---
 
@@ -151,6 +215,11 @@ To protect historical contest data and audit trails:
 - **Question Structure Lock**: Once an activity has at least one attempt, scoring-affecting fields (`weight`, `type`, choices, `isCorrect`, `speedBonus*`, `timeReferenceSeconds`) are permanently immutable. Modification attempts return `409 Conflict` (`QUESTION_LOCKED`). Only cosmetic edits (e.g., fixing a typo in question text) are allowed. Deletion of questions with attempts is blocked.
 - **Activity Immutability**: `slug`, `mode`, and `groupId` cannot be altered once an activity is published or has attempts (`409 Conflict: IMMUTABLE_FIELD`).
 - **Publish Prerequisites**: Publishing requires at least one question, with at least one correct choice, and a valid schedule window (`opensAt < closesAt`).
+- **Pre/Post Linked Activity Requirements**:
+  - Activities configured with `phase: 'pre'` or `'post'` must specify a `groupId`.
+  - Linked activities **must require `participantCode`** in `participantFields`. Publishing an activity with optional `participantCode` is rejected (`400 PARTICIPANT_CODE_REQUIRED_FOR_LINKED_ACTIVITY`). Once published, `participantCode` cannot be changed back to optional.
+  - A group can contain at most one `pre` and one `post` activity, enforced atomically via collection `activityGroupPhases` (`409 DUPLICATE_GROUP_PHASE`).
+  - Pre/post question statistics comparison pairs questions by unique `comparisonKey`. Questions without counterparts across both phases are reported as unmatched.
 
 ---
 
@@ -183,11 +252,21 @@ Firebase Hosting is configured with rewrite rules routing `/api/**` to Cloud Fun
 
 ## 9. Deviations and Trade-offs
 
-1. **Storage Signed URLs in Emulator**:
+1. **Subcollection `entries` for Leaderboard**:
+   To avoid a single shared hot document and reduce write contention under high concurrency, individual participant entries are stored in `leaderboardSnapshots/{activityId}/entries/{attemptId}` with independent per-attempt writes, while raw attempts and answers remain the durable source of truth and metadata remains at `leaderboardSnapshots/{activityId}`.
+2. **Server-Only Collections (`questionStates` & `attemptSnapshots`)**:
+   `questionStates` stores enter markers and hidden back-navigation counters. `attemptSnapshots` permanently isolates frozen question structures from the lightweight attempt document, ensuring historical scoring integrity.
+3. **Lazy Idempotent Leaderboard Finalization**:
+   Instead of requiring a scheduled Cloud Function (cron), finalization runs lazily on activity close (`POST /close`) and whenever leaderboard or stats are retrieved after the finish grace window.
+4. **Question Comparison Pairing via `comparisonKey`**:
+   Rather than fragile position-based index pairing across two distinct activities, pre/post delta pairing matches questions using explicit `comparisonKey` attributes.
+5. **Direct Firestore Role Authority**:
+   To eliminate security windows where revoked or downgraded operators use unexpired ID tokens, role and status are loaded directly from the Firestore operator record on every protected request with zero cache.
+6. **Storage Signed URLs in Emulator**:
    In production Google Cloud environments, signed URLs are generated via Google Cloud Storage RSA private keys. In the local Firebase Emulator Suite, service account keys are not available; therefore, the storage service generates an emulator-compatible media URL fallback (`http://127.0.0.1:9199/v0/b/...`) when running under `FUNCTIONS_EMULATOR=true`.
-2. **OpenAPI `Operators` Tag**:
-   As required by Sprint 1.1 Section 5, an explicit `Operators` tag was added to OpenAPI 3.1 to document operator administration endpoints alongside `Auth`, `Activities`, `Questions`, `Attempts`, `Leaderboard`, `Stats`, and `Storage`.
-3. **Vitest Serial Test Execution**:
+7. **OpenAPI `Operators` Tag**:
+   An explicit `Operators` tag was added to OpenAPI 3.1 to document operator administration endpoints alongside `Auth`, `Activities`, `Questions`, `Attempts`, `Leaderboard`, `Stats`, and `Storage`.
+8. **Vitest Serial Test Execution**:
    Because multiple integration test suites interact with shared Firestore emulator collections (`operators`, `loginAttempts`, `attempts`), `fileParallelism: false` is configured in `functions/vitest.config.ts`. This prevents cross-file race conditions on document resets.
 
 ---
@@ -196,8 +275,8 @@ Firebase Hosting is configured with rewrite rules routing `/api/**` to Cloud Fun
 
 1. **Network Latency Variance**:
    Server-authoritative timing measures elapsed time using `serverReceivedAt`. On mobile networks with high jitter or intermittent disconnects, latency spikes may slightly increase recorded duration.
-2. **Unordered Question Answering**:
-   Because participants can answer questions in arbitrary order, question duration is derived by taking the delta from the previously recorded answer (or attempt start time). If a participant pauses on one question before answering another, the idle duration is associated with the active question window.
+2. **Tab Left Open / Idle Time**:
+   Because question duration is measured from `firstEnteredAt` to `serverReceivedAt`, if a participant leaves a question tab open or steps away before answering, the recorded duration reflects the total elapsed time.
 
 ---
 
@@ -221,7 +300,7 @@ npm --prefix functions run openapi:validate
 ```bash
 firebase emulators:exec --only auth,firestore,functions,hosting,storage "npm --prefix functions test"
 ```
-The test suite executes 185 tests across 14 test suites covering role matrices, attempt security, timing attacks, leak prevention, pagination, and emulator smoke tests.
+The test suite executes 207 tests across 15 test suites covering role matrices, live leaderboards, attempt security, enter marker timing, pre/post identity requirements, attempt snapshots, leak prevention, pagination, and emulator smoke tests.
 
 ### 4. Running Emulators Locally
 ```bash

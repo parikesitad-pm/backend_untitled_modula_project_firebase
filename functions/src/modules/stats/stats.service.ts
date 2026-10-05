@@ -5,6 +5,7 @@ import { questionsService } from '../questions/questions.service';
 import { normalizeParticipantCode } from '../participants/participants.schema';
 import { ActivityStatsSummary, QuestionStat, PrePostComparison, PrePostParticipantComparison } from './stats.schema';
 import { getClock } from '../../lib/clock';
+import { leaderboardService } from '../leaderboard/leaderboard.service';
 
 export class StatsService {
   private attemptsCol = db.collection('attempts');
@@ -14,7 +15,10 @@ export class StatsService {
   private attemptSnapshotsCol = db.collection('attemptSnapshots');
 
   async getActivityStats(activityId: string): Promise<ActivityStatsSummary> {
-    await activitiesService.getById(activityId);
+    const activity = await activitiesService.getById(activityId);
+    if (activitiesService.isEffectiveClosed(activity)) {
+      await leaderboardService.finalizeActivity(activityId);
+    }
 
     const [participantsSnap, attemptsSnap] = await Promise.all([
       this.participantsCol.where('activityId', '==', activityId).get(),
@@ -140,10 +144,88 @@ export class StatsService {
     const docs = hasMore ? snap.docs.slice(0, pageLimit) : snap.docs;
     const nextCursor = hasMore ? docs[docs.length - 1].id : null;
 
-    return { items: docs.map((d) => ({ id: d.id, ...d.data() })), meta: { limit: pageLimit, nextCursor } };
+    const items = await Promise.all(
+      docs.map(async (d) => {
+        const data = d.data();
+        let questionBody = data.questionBody;
+        let selectedChoiceBodies = data.selectedChoiceBodies;
+        if (!questionBody) {
+          const sDoc = await this.attemptSnapshotsCol.doc(data.attemptId).get();
+          if (sDoc.exists) {
+            const q = sDoc.data()?.questions?.find((sq: any) => sq.questionId === data.questionId);
+            if (q) {
+              questionBody = q.body;
+              selectedChoiceBodies = q.choices
+                ?.filter((c: any) => (data.selectedChoiceIds || []).includes(c.id))
+                .map((c: any) => c.body);
+            }
+          }
+        }
+        return {
+          id: d.id,
+          ...data,
+          questionBody: questionBody || data.body || '',
+          selectedChoiceBodies: selectedChoiceBodies || [],
+        };
+      })
+    );
+
+    return { items, meta: { limit: pageLimit, nextCursor } };
+  }
+
+  async getParticipantDetail(activityId: string, participantId: string): Promise<any> {
+    await activitiesService.getById(activityId);
+    const pDoc = await this.participantsCol.doc(participantId).get();
+    if (!pDoc.exists) throw new NotFoundError('Participant not found');
+    const participant = { id: pDoc.id, ...pDoc.data() };
+
+    const attemptsSnap = await this.attemptsCol
+      .where('activityId', '==', activityId)
+      .where('participantId', '==', participantId)
+      .orderBy('startedAt', 'asc')
+      .get();
+
+    const attempts = await Promise.all(
+      attemptsSnap.docs.map(async (attDoc) => {
+        const attData = { id: attDoc.id, ...attDoc.data() };
+        const snapDoc = await this.attemptSnapshotsCol.doc(attDoc.id).get();
+        const snapshotQuestions = snapDoc.exists ? snapDoc.data()?.questions || [] : [];
+
+        const answersSnap = await this.answersCol
+          .where('attemptId', '==', attDoc.id)
+          .orderBy('serverReceivedAt', 'asc')
+          .get();
+
+        const answers = answersSnap.docs.map((aDoc) => {
+          const a = aDoc.data();
+          const qSnap = snapshotQuestions.find((sq: any) => sq.questionId === a.questionId);
+          return {
+            id: aDoc.id,
+            ...a,
+            questionBody: qSnap ? qSnap.body : a.questionBody,
+            choices: qSnap ? qSnap.choices : [],
+          };
+        });
+
+        return {
+          ...attData,
+          answers,
+        };
+      })
+    );
+
+    return {
+      ...participant,
+      attempts,
+    };
   }
 
   async getQuestionStats(activityId: string): Promise<QuestionStat[]> {
+    const activity = await activitiesService.getById(activityId);
+    if (activitiesService.isEffectiveClosed(activity)) {
+      await leaderboardService.finalizeActivity(activityId);
+    }
+
     const questions = await questionsService.getByActivityId(activityId, false);
     const answersSnap = await this.answersCol.where('activityId', '==', activityId).get();
     const answers = answersSnap.docs.map((d) => d.data());
@@ -280,26 +362,22 @@ export class StatsService {
     );
 
     // Map attemptId_questionId -> snapshotted comparisonKey
-    const preKeyByAttemptQuestion = new Map<string, string>();
+    const preKeyByAttemptQuestion = new Map<string, string | null>();
     preSnapshotDocs.forEach((sDoc) => {
       if (sDoc.exists) {
         const questions = sDoc.data()?.questions || [];
         questions.forEach((q: any) => {
-          if (q.comparisonKey) {
-            preKeyByAttemptQuestion.set(`${sDoc.id}_${q.questionId}`, q.comparisonKey);
-          }
+          preKeyByAttemptQuestion.set(`${sDoc.id}_${q.questionId}`, q.comparisonKey || null);
         });
       }
     });
 
-    const postKeyByAttemptQuestion = new Map<string, string>();
+    const postKeyByAttemptQuestion = new Map<string, string | null>();
     postSnapshotDocs.forEach((sDoc) => {
       if (sDoc.exists) {
         const questions = sDoc.data()?.questions || [];
         questions.forEach((q: any) => {
-          if (q.comparisonKey) {
-            postKeyByAttemptQuestion.set(`${sDoc.id}_${q.questionId}`, q.comparisonKey);
-          }
+          postKeyByAttemptQuestion.set(`${sDoc.id}_${q.questionId}`, q.comparisonKey || null);
         });
       }
     });
@@ -321,15 +399,16 @@ export class StatsService {
       const allKeys = new Set<string>();
       preQuestions.forEach((q) => { if (q.comparisonKey) allKeys.add(q.comparisonKey); });
       postQuestions.forEach((q) => { if (q.comparisonKey) allKeys.add(q.comparisonKey); });
-      preKeyByAttemptQuestion.forEach((k) => allKeys.add(k));
-      postKeyByAttemptQuestion.forEach((k) => allKeys.add(k));
+      preKeyByAttemptQuestion.forEach((k) => { if (k) allKeys.add(k); });
+      postKeyByAttemptQuestion.forEach((k) => { if (k) allKeys.add(k); });
 
       // Calculate stats per key
       const preCountsByKey = new Map<string, { total: number; correct: number }>();
       preAnswersSnap.docs.forEach((d) => {
         const a = d.data();
-        const key = preKeyByAttemptQuestion.get(`${a.attemptId}_${a.questionId}`) ||
-          preQuestions.find((q) => q.id === a.questionId)?.comparisonKey;
+        const key = preKeyByAttemptQuestion.has(`${a.attemptId}_${a.questionId}`)
+          ? preKeyByAttemptQuestion.get(`${a.attemptId}_${a.questionId}`)
+          : preQuestions.find((q) => q.id === a.questionId)?.comparisonKey;
         if (key) {
           const cur = preCountsByKey.get(key) || { total: 0, correct: 0 };
           cur.total++;
@@ -341,8 +420,9 @@ export class StatsService {
       const postCountsByKey = new Map<string, { total: number; correct: number }>();
       postAnswersSnap.docs.forEach((d) => {
         const a = d.data();
-        const key = postKeyByAttemptQuestion.get(`${a.attemptId}_${a.questionId}`) ||
-          postQuestions.find((q) => q.id === a.questionId)?.comparisonKey;
+        const key = postKeyByAttemptQuestion.has(`${a.attemptId}_${a.questionId}`)
+          ? postKeyByAttemptQuestion.get(`${a.attemptId}_${a.questionId}`)
+          : postQuestions.find((q) => q.id === a.questionId)?.comparisonKey;
         if (key) {
           const cur = postCountsByKey.get(key) || { total: 0, correct: 0 };
           cur.total++;

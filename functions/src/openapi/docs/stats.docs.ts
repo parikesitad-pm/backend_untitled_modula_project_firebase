@@ -23,6 +23,56 @@ registry.registerPath({
 
 registry.registerPath({
   method: 'get',
+  path: '/api/activities/{id}/participants',
+  tags: ['Stats'],
+  summary: 'Activity participants list with attempt progress and latest scores',
+  security: [{ BearerAuth: [] }],
+  request: {
+    params: z.object({ id: z.string() }),
+    query: z.object({
+      limit: z.string().optional().openapi({ example: '50', description: 'Page size (1-200, default 50)' }),
+      cursor: z.string().optional().openapi({ description: 'Next cursor ID from previous page meta' }),
+    }),
+  },
+  responses: {
+    200: jsonResponse(
+      z.object({
+        success: z.literal(true),
+        data: z.array(z.record(z.unknown())),
+        meta: z.object({
+          limit: z.number(),
+          nextCursor: z.string().nullable(),
+        }).optional(),
+      }),
+      'Participants list'
+    ),
+    404: jsonResponse(ErrorResponseSchema, 'Activity not found'),
+  },
+});
+
+registry.registerPath({
+  method: 'get',
+  path: '/api/activities/{id}/participants/{participantId}',
+  tags: ['Stats'],
+  summary: 'Participant detail with attempt history and snapshotted question text',
+  security: [{ BearerAuth: [] }],
+  request: {
+    params: z.object({ id: z.string(), participantId: z.string() }),
+  },
+  responses: {
+    200: jsonResponse(
+      z.object({
+        success: z.literal(true),
+        data: z.record(z.unknown()),
+      }),
+      'Participant detail'
+    ),
+    404: jsonResponse(ErrorResponseSchema, 'Participant not found'),
+  },
+});
+
+registry.registerPath({
+  method: 'get',
   path: '/api/activities/{id}/responses',
   tags: ['Stats'],
   summary: 'Activity response/answers database for export',

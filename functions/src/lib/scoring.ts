@@ -169,8 +169,10 @@ export interface LeaderboardRankable {
   scorePercent?: number;
   finalScore?: number;
   durationMs: number;
-  rankTimeAt?: string | number | Date | null;
+  status?: string;
+  lastAnswerAt?: string | number | Date | null;
   completedAt?: string | number | Date | null;
+  rankTimeAt?: string | number | Date | null;
 }
 
 export function compareLeaderboardEntries(a: LeaderboardRankable, b: LeaderboardRankable): number {
@@ -185,8 +187,10 @@ export function compareLeaderboardEntries(a: LeaderboardRankable, b: Leaderboard
   if (a.durationMs !== b.durationMs) {
     return a.durationMs - b.durationMs;
   }
-  const timeA = new Date(a.rankTimeAt || a.completedAt || 0).getTime();
-  const timeB = new Date(b.rankTimeAt || b.completedAt || 0).getTime();
+  const rawTimeA = a.rankTimeAt ?? (a.status === 'completed' && a.completedAt ? a.completedAt : (a.lastAnswerAt || a.completedAt));
+  const rawTimeB = b.rankTimeAt ?? (b.status === 'completed' && b.completedAt ? b.completedAt : (b.lastAnswerAt || b.completedAt));
+  const timeA = rawTimeA ? new Date(rawTimeA).getTime() : 0;
+  const timeB = rawTimeB ? new Date(rawTimeB).getTime() : 0;
   if (timeA !== timeB) {
     return timeA - timeB;
   }

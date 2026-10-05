@@ -63,6 +63,10 @@ router.get('/:id/participants', requireCapability('read:pii'), (req, res, next) 
   statsController.getParticipants(req, res, next);
 });
 
+router.get('/:id/participants/:participantId', requireCapability('read:pii'), (req, res, next) => {
+  statsController.getParticipantDetail(req, res, next);
+});
+
 router.get('/:id/responses', requireCapability('read:pii'), (req, res, next) => {
   statsController.getResponses(req, res, next);
 });

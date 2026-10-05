@@ -49,18 +49,18 @@ service cloud.firestore {
     }
 
     // Leaderboard snapshots: operators can always read.
-    // Public can only read when activity is published/closed and leaderboard is visible.
+    // Public can only read when activity is published/closed and visibleToParticipants is true.
     match /leaderboardSnapshots/{snapshotId} {
       allow read: if isOperator() || (
         resource.data.status in ['published', 'closed'] &&
-        resource.data.hideLeaderboardFromParticipants != true
+        resource.data.visibleToParticipants == true
       );
       allow write: if false;
 
       match /entries/{entryId} {
         allow read: if isOperator() || (
           get(/databases/$(database)/documents/leaderboardSnapshots/$(snapshotId)).data.status in ['published', 'closed'] &&
-          get(/databases/$(database)/documents/leaderboardSnapshots/$(snapshotId)).data.hideLeaderboardFromParticipants != true
+          get(/databases/$(database)/documents/leaderboardSnapshots/$(snapshotId)).data.visibleToParticipants == true
         );
         allow write: if false;
       }

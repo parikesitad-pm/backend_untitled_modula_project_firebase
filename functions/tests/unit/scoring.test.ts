@@ -227,5 +227,51 @@ describe('Scoring Module', () => {
       const attB = { ...base, attemptId: 'att-2' };
       expect(compareLeaderboardEntries(attA, attB)).toBeLessThan(0);
     });
+
+    it('handles scorePercent and in_progress lastAnswerAt correctly', () => {
+      const liveEntry1 = {
+        attemptId: 'live-1',
+        leaderboardPoints: 5,
+        scorePercent: 50,
+        status: 'in_progress',
+        durationMs: 3000,
+        lastAnswerAt: '2026-01-01T10:00:00Z',
+        completedAt: null,
+      };
+
+      const liveEntry2 = {
+        attemptId: 'live-2',
+        leaderboardPoints: 5,
+        scorePercent: 40,
+        status: 'in_progress',
+        durationMs: 3000,
+        lastAnswerAt: '2026-01-01T10:00:00Z',
+        completedAt: null,
+      };
+
+      // Higher scorePercent ranks first
+      expect(compareLeaderboardEntries(liveEntry1, liveEntry2)).toBeLessThan(0);
+
+      // Same scorePercent, earlier lastAnswerAt ranks first
+      const liveEntry3 = {
+        ...liveEntry1,
+        attemptId: 'live-3',
+        lastAnswerAt: '2026-01-01T09:59:00Z',
+      };
+      expect(compareLeaderboardEntries(liveEntry3, liveEntry1)).toBeLessThan(0);
+
+      // Completed entry uses completedAt
+      const completedEntry = {
+        attemptId: 'comp-1',
+        leaderboardPoints: 5,
+        scorePercent: 50,
+        status: 'completed',
+        durationMs: 3000,
+        lastAnswerAt: '2026-01-01T08:00:00Z',
+        completedAt: '2026-01-01T10:05:00Z',
+      };
+      // liveEntry1 lastAnswerAt 10:00 is earlier than completedEntry completedAt 10:05
+      expect(compareLeaderboardEntries(liveEntry1, completedEntry)).toBeLessThan(0);
+    });
   });
 });

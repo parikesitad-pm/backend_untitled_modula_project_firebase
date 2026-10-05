@@ -25,7 +25,7 @@ export class PublicController {
         throw new BadRequestError('Activity has closed', 'ACTIVITY_CLOSED');
       }
 
-      const questions = await questionsService.getByActivityId(activity.id, false);
+      const questions = await questionsService.getByActivityId(activity.id, true);
       const questionCount = questions.length;
 
       const { id, title, description, mode, slug, phase, groupId, opensAt, closesAt, participantFields, settings } = activity;

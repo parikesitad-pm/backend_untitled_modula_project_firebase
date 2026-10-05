@@ -51,6 +51,15 @@ export class StatsController {
       next(err);
     }
   }
+
+  async getParticipantDetail(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await statsService.getParticipantDetail(req.params.id, req.params.participantId);
+      sendSuccess(res, result);
+    } catch (err) {
+      next(err);
+    }
+  }
 }
 
 export const statsController = new StatsController();

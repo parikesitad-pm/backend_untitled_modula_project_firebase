@@ -16,7 +16,8 @@ export class LeaderboardController {
         }
       }
 
-      const result = await leaderboardService.getLeaderboard(req.params.slug, operator);
+      const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : undefined;
+      const result = await leaderboardService.getLeaderboard(req.params.slug, operator, limit);
       sendSuccess(res, result);
     } catch (err) {
       next(err);

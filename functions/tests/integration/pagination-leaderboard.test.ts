@@ -163,22 +163,25 @@ describe('Pagination & Leaderboard Privacy Integration Tests', () => {
   });
 
   it('guarantees leaderboard snapshot document contains zero PII', async () => {
-    const snapDoc = await db.collection('leaderboardSnapshots').doc(testActId).get();
-    expect(snapDoc.exists).toBe(true);
-    const data = snapDoc.data()!;
+    const metaDoc = await db.collection('leaderboardSnapshots').doc(testActId).get();
+    expect(metaDoc.exists).toBe(true);
+    const metaData = metaDoc.data()!;
+    expect(metaData).not.toHaveProperty('participantCode');
+    expect(metaData).not.toHaveProperty('email');
+    expect(metaData).not.toHaveProperty('division');
 
-    // Check all entries in top5 and others
-    const allEntries = [...(data.top5 || []), ...(data.others || [])];
-    expect(allEntries.length).toBeGreaterThan(0);
+    const entriesSnap = await db.collection('leaderboardSnapshots').doc(testActId).collection('entries').get();
+    expect(entriesSnap.size).toBeGreaterThan(0);
 
-    for (const entry of allEntries) {
+    for (const doc of entriesSnap.docs) {
+      const entry = doc.data();
       expect(entry).not.toHaveProperty('participantCode');
       expect(entry).not.toHaveProperty('email');
       expect(entry).not.toHaveProperty('division');
       expect(entry).not.toHaveProperty('customFields');
       expect(entry).toHaveProperty('displayName');
-      expect(entry).toHaveProperty('finalScore');
       expect(entry).toHaveProperty('leaderboardPoints');
+      expect(entry).toHaveProperty('scorePercent');
       expect(entry).toHaveProperty('durationMs');
     }
   });

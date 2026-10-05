@@ -2,6 +2,7 @@ import { db } from '../../config/firebase';
 import { NotFoundError, ConflictError, BadRequestError } from '../../lib/errors';
 import { CreateActivityInput, UpdateActivityInput, ActivityQuery } from './activities.schema';
 import { getClock } from '../../lib/clock';
+import { leaderboardService } from '../leaderboard/leaderboard.service';
 
 export interface ActivityDocument extends CreateActivityInput {
   id: string;
@@ -176,6 +177,48 @@ export class ActivitiesService {
     }
 
     const updatedAt = getClock().nowIso();
+    const newPhase = input.phase !== undefined ? input.phase : current.phase;
+    const newGroupId = input.groupId !== undefined ? input.groupId : current.groupId;
+
+    if (newPhase === 'pre' || newPhase === 'post') {
+      if (!newGroupId) {
+        throw new BadRequestError('Linked pre/post activities require a groupId', 'GROUP_ID_REQUIRED');
+      }
+    }
+
+    const phaseChanged = newPhase !== current.phase || newGroupId !== current.groupId;
+    if (phaseChanged) {
+      const oldResRef = current.groupId && (current.phase === 'pre' || current.phase === 'post')
+        ? this.phasesCol.doc(`${current.groupId}_${current.phase}`)
+        : null;
+      const newResRef = newGroupId && (newPhase === 'pre' || newPhase === 'post')
+        ? this.phasesCol.doc(`${newGroupId}_${newPhase}`)
+        : null;
+
+      await db.runTransaction(async (t) => {
+        if (newResRef) {
+          const existingRes = await t.get(newResRef);
+          if (existingRes.exists && existingRes.data()?.activityId !== id) {
+            throw new ConflictError(
+              `A '${newPhase}' activity already exists for group '${newGroupId}'`,
+              'DUPLICATE_GROUP_PHASE'
+            );
+          }
+          t.set(newResRef, {
+            groupId: newGroupId,
+            phase: newPhase,
+            activityId: id,
+            updatedAt,
+          });
+        }
+        if (oldResRef && (!newResRef || oldResRef.id !== newResRef.id)) {
+          t.delete(oldResRef);
+        }
+        t.update(this.col.doc(id), { ...input, updatedAt });
+      });
+      return this.getById(id);
+    }
+
     await this.col.doc(id).update({ ...input, updatedAt });
     return this.getById(id);
   }
@@ -222,6 +265,7 @@ export class ActivitiesService {
       throw new BadRequestError('Cannot publish an activity whose closing time has already passed');
     }
 
+    const publishedAt = getClock().nowIso();
     if (activity.phase === 'pre' || activity.phase === 'post') {
       if (!activity.groupId) {
         throw new BadRequestError('Linked pre/post activities require a groupId', 'GROUP_ID_REQUIRED');
@@ -247,15 +291,28 @@ export class ActivitiesService {
           groupId: activity.groupId,
           phase: activity.phase,
           activityId: activity.id,
-          publishedAt: getClock().nowIso(),
+          publishedAt,
         });
-        t.update(this.col.doc(id), { status: 'published', updatedAt: getClock().nowIso() });
+        t.update(this.col.doc(id), { status: 'published', updatedAt: publishedAt });
       });
-      return this.getById(id);
+    } else {
+      await this.col.doc(id).update({ status: 'published', updatedAt: publishedAt });
     }
 
-    const updatedAt = getClock().nowIso();
-    await this.col.doc(id).update({ status: 'published', updatedAt });
+    // Initialize leaderboard meta document
+    await db.collection('leaderboardSnapshots').doc(id).set(
+      {
+        activityId: id,
+        slug: activity.slug,
+        state: 'live',
+        status: 'published',
+        visibleToParticipants: !activity.settings?.hideLeaderboardFromParticipants,
+        updatedAt: publishedAt,
+        participantCount: 0,
+      },
+      { merge: true }
+    );
+
     return this.getById(id);
   }
 
@@ -266,6 +323,7 @@ export class ActivitiesService {
     }
     const updatedAt = getClock().nowIso();
     await this.col.doc(id).update({ status: 'closed', updatedAt });
+    await leaderboardService.finalizeActivity(id);
     return this.getById(id);
   }
 

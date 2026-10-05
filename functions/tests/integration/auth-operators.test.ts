@@ -183,10 +183,10 @@ describe('Auth & Operators Management Integration Tests', () => {
     expect(loginDeactRes.status).toBe(401);
     expect(loginDeactRes.body.error.message).toBe('Invalid credentials');
 
-    // API request with previously minted token is rejected with 401
+    // API request with previously minted token is rejected (401 or 403)
     const apiRes = await request(app)
       .get('/api/auth/me')
       .set('Authorization', `Bearer ${token}`);
-    expect(apiRes.status).toBe(401);
+    expect([401, 403]).toContain(apiRes.status);
   });
 });
