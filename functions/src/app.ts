@@ -36,6 +36,18 @@ export function createApp(): Express {
   // API Documentation routes
   app.get('/api/openapi.json', (_req, res) => res.json(openApiDoc));
   app.get('/openapi.json', (_req, res) => res.json(openApiDoc));
+
+  // Swagger UI trailing-slash redirect (fixes blank UI under Vercel catch-all rewrites)
+  app.get(['/api/docs', '/docs'], (req, res, next) => {
+    const urlPath = req.originalUrl.split('?')[0];
+    if (!urlPath.endsWith('/')) {
+      const query = req.originalUrl.includes('?') ? req.originalUrl.substring(urlPath.length) : '';
+      const target = (urlPath === '/docs' ? '/api/docs/' : urlPath + '/') + query;
+      return res.redirect(301, target);
+    }
+    next();
+  });
+
   app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openApiDoc));
   app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiDoc));
 

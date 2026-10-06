@@ -34,9 +34,48 @@ describe('OpenAPI & Swagger Documentation', () => {
     expect(resRoot.status).toBe(200);
   });
 
-  it('serves Swagger UI at /api/docs and /docs', async () => {
+  it('redirects /api/docs to /api/docs/ with 301', async () => {
+    const res = await request(app).get('/api/docs');
+    expect(res.status).toBe(301);
+    expect(res.headers.location).toBe('/api/docs/');
+  });
+
+  it('redirects /docs to /api/docs/ with 301 for local/legacy compatibility', async () => {
+    const res = await request(app).get('/docs');
+    expect(res.status).toBe(301);
+    expect(res.headers.location).toBe('/api/docs/');
+  });
+
+  it('serves Swagger UI correctly from /api/docs/ referencing valid asset paths', async () => {
     const res = await request(app).get('/api/docs/');
     expect(res.status).toBe(200);
-    expect(res.text).toContain('swagger-ui');
+    expect(res.headers['content-type']).toContain('text/html');
+    expect(res.text).toContain('Swagger UI');
+    expect(res.text).toContain('<link rel="stylesheet" type="text/css" href="./swagger-ui.css"');
+    expect(res.text).toContain('<script src="./swagger-ui-bundle.js"');
+  });
+
+  it('serves Swagger UI static assets correctly from /api/docs/ with appropriate content types', async () => {
+    const cssRes = await request(app).get('/api/docs/swagger-ui.css');
+    expect(cssRes.status).toBe(200);
+    expect(cssRes.headers['content-type']).toContain('text/css');
+
+    const jsBundleRes = await request(app).get('/api/docs/swagger-ui-bundle.js');
+    expect(jsBundleRes.status).toBe(200);
+    expect(jsBundleRes.headers['content-type']).toContain('application/javascript');
+
+    const jsPresetRes = await request(app).get('/api/docs/swagger-ui-standalone-preset.js');
+    expect(jsPresetRes.status).toBe(200);
+    expect(jsPresetRes.headers['content-type']).toContain('application/javascript');
+
+    const jsInitRes = await request(app).get('/api/docs/swagger-ui-init.js');
+    expect(jsInitRes.status).toBe(200);
+    expect(jsInitRes.headers['content-type']).toContain('application/javascript');
+  });
+
+  it('serves Swagger UI from /docs/ for local compatibility', async () => {
+    const res = await request(app).get('/docs/');
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('Swagger UI');
   });
 });

@@ -133,12 +133,15 @@ describe('Production Readiness & Security Tests', () => {
       expect(res.body.paths).toHaveProperty('/api/health');
     });
 
-    it('serves Swagger UI at /api/docs', async () => {
+    it('redirects /api/docs to /api/docs/ and serves Swagger UI', async () => {
       const testApp = createApp();
-      const res = await request(testApp).get('/api/docs/');
+      const redirectRes = await request(testApp).get('/api/docs');
+      expect(redirectRes.status).toBe(301);
+      expect(redirectRes.headers.location).toBe('/api/docs/');
 
+      const res = await request(testApp).get('/api/docs/');
       expect(res.status).toBe(200);
-      expect(res.text).toContain('swagger-ui');
+      expect(res.text).toContain('Swagger UI');
     });
   });
 
