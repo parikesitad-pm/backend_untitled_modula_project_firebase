@@ -1,5 +1,4 @@
 import { db } from '../../config/firebase';
-import { ForbiddenError } from '../../lib/errors';
 import { activitiesService } from '../activities/activities.service';
 import { AuthOperator } from '../../middleware/auth.middleware';
 import { LeaderboardResponse, LeaderboardEntry } from './leaderboard.schema';
@@ -222,8 +221,24 @@ export class LeaderboardService {
   ): Promise<LeaderboardResponse> {
     const activity = await activitiesService.getBySlug(slug);
 
-    if (activity.settings?.hideLeaderboardFromParticipants && !operator) {
-      throw new ForbiddenError('Leaderboard is hidden by the organizer', 'LEADERBOARD_HIDDEN');
+    const isExplicitlyDisabled = activity.settings?.leaderboardEnabled === false;
+    const isHiddenFromParticipants = Boolean(activity.settings?.hideLeaderboardFromParticipants);
+
+    if ((isExplicitlyDisabled || isHiddenFromParticipants) && !operator) {
+      return {
+        disabled: true,
+        message: 'Leaderboard is disabled for this activity',
+        activityId: activity.id,
+        activityTitle: activity.title,
+        slug: activity.slug,
+        state: activitiesService.isEffectiveClosed(activity) ? 'final' : 'live',
+        top5: [],
+        others: [],
+        entries: [],
+        totalCompleted: 0,
+        totalEntries: 0,
+        updatedAt: getClock().nowIso(),
+      };
     }
 
     if (activitiesService.isEffectiveClosed(activity)) {
@@ -260,15 +275,18 @@ export class LeaderboardService {
 
     entriesDocs.sort((a, b) => compareLeaderboardEntries(a, b));
 
+    const scoreVisible = activity.settings?.scoreVisible !== false;
+    const rankVisible = activity.settings?.rankVisible !== false;
+
     const rankedEntries: LeaderboardEntry[] = entriesDocs.map((doc, idx) => ({
-      rank: idx + 1,
+      rank: !operator && !rankVisible ? 0 : idx + 1,
       attemptId: doc.attemptId,
       displayName: doc.displayName,
       status: doc.status,
       locked: doc.locked,
-      leaderboardPoints: doc.leaderboardPoints,
-      scorePercent: doc.scorePercent,
-      finalScore: doc.scorePercent,
+      leaderboardPoints: !operator && !scoreVisible ? 0 : doc.leaderboardPoints,
+      scorePercent: !operator && !scoreVisible ? 0 : doc.scorePercent,
+      finalScore: !operator && !scoreVisible ? 0 : doc.scorePercent,
       answeredCount: doc.answeredCount,
       totalQuestions: doc.totalQuestions,
       durationMs: doc.durationMs,

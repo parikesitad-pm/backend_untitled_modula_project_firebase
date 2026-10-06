@@ -20,6 +20,8 @@ export const LeaderboardEntrySchema = z.object({
 export type LeaderboardEntry = z.infer<typeof LeaderboardEntrySchema>;
 
 export const LeaderboardResponseSchema = z.object({
+  disabled: z.boolean().optional(),
+  message: z.string().optional(),
   activityId: z.string(),
   activityTitle: z.string(),
   slug: z.string(),

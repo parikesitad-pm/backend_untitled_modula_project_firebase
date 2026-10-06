@@ -56,13 +56,16 @@ export interface AttemptDocument {
   participantCode?: string;
   displayName: string;
   status: 'in_progress' | 'completed' | 'abandoned' | 'expired';
+  completionReason?: 'submitted' | 'expired' | 'host_ended' | 'abandoned' | null;
   startedAt: string;
+  expiresAt: string | null;
   completedAt: string | null;
   lastAnswerAt?: string | null;
   finalScore: number;
   scorePercent?: number;
   leaderboardPoints: number;
   durationMs: number;
+  totalDurationMs?: number;
   answeredCount: number;
   earnedWeight: number;
   attemptTokenHash: string;
@@ -114,6 +117,14 @@ export class AttemptsService {
     }
   }
 
+  isAttemptExpired(attempt: AttemptDocument): boolean {
+    if (attempt.status === 'expired') return true;
+    if (attempt.status !== 'in_progress') return false;
+    if (!attempt.expiresAt) return false;
+    const now = getClock().now().getTime();
+    return now > new Date(attempt.expiresAt).getTime();
+  }
+
   async startAttempt(
     slug: string,
     input: ParticipantInput
@@ -150,6 +161,15 @@ export class AttemptsService {
     const docRef = this.col.doc();
     const attemptId = docRef.id;
 
+    // Calculate authoritative expiresAt if time limit is enabled
+    const timeLimitEnabled = activity.settings?.timeLimitEnabled ?? false;
+    const timeLimitSecs = activity.settings?.activityTimeLimitSeconds ?? activity.settings?.timeLimitSeconds ?? null;
+    let expiresAt: string | null = null;
+    if (timeLimitEnabled && timeLimitSecs && timeLimitSecs > 0) {
+      const startedAtMs = new Date(now).getTime();
+      expiresAt = new Date(startedAtMs + timeLimitSecs * 1000).toISOString();
+    }
+
     // Build AttemptSnapshotDocument
     const snapshotQuestions: SnapshotQuestion[] = liveQuestions.map((q) => ({
       questionId: q.id,
@@ -180,13 +200,16 @@ export class AttemptsService {
       participantCode: participant.participantCode || '',
       displayName: participant.name,
       status: 'in_progress',
+      completionReason: null,
       startedAt: now,
+      expiresAt,
       completedAt: null,
       lastAnswerAt: null,
       finalScore: 0,
       scorePercent: 0,
       leaderboardPoints: 0,
       durationMs: 0,
+      totalDurationMs: 0,
       answeredCount: 0,
       earnedWeight: 0,
       attemptTokenHash,
@@ -253,6 +276,17 @@ export class AttemptsService {
     if (!attemptDoc.exists) throw new NotFoundError(`Attempt '${attemptId}' not found`);
     const attempt = attemptDoc.data() as AttemptDocument;
     this.verifyToken(attempt, token);
+
+    if (this.isAttemptExpired(attempt)) {
+      const nowIso = getClock().nowIso();
+      await this.col.doc(attemptId).update({
+        status: 'expired',
+        completionReason: 'expired',
+        completedAt: attempt.expiresAt || nowIso,
+        updatedAt: nowIso,
+      });
+      throw new BadRequestError('Attempt has expired', 'ATTEMPT_EXPIRED');
+    }
 
     if (attempt.status !== 'in_progress') {
       throw new BadRequestError('Attempt is not in progress', 'ATTEMPT_NOT_IN_PROGRESS');
@@ -347,6 +381,16 @@ export class AttemptsService {
         throw new BadRequestError('Attempt is not in progress', 'ATTEMPT_NOT_IN_PROGRESS');
       }
 
+      if (this.isAttemptExpired(attempt)) {
+        t.update(attemptRef, {
+          status: 'expired',
+          completionReason: 'expired',
+          completedAt: attempt.expiresAt || serverReceivedAt,
+          updatedAt: serverReceivedAt,
+        });
+        throw new BadRequestError('Attempt has expired', 'ATTEMPT_EXPIRED');
+      }
+
       const activity = await activitiesService.getById(attempt.activityId);
       if (activitiesService.isEffectiveClosed(activity)) {
         throw new BadRequestError('Activity has closed', 'ACTIVITY_CLOSED');
@@ -413,7 +457,9 @@ export class AttemptsService {
         serverReceivedAt,
         clientEnteredAt: input.enteredAt || null,
         clientAnsweredAt: input.answeredAt || null,
+        answeredAt: serverReceivedAt,
         durationMs: officialDurationMs,
+        responseDurationMs: officialDurationMs,
         earnedWeight: scored.earnedWeight,
         speedBonus: scored.speedBonus,
         leaderboardPoints: scored.leaderboardPoints,
@@ -478,6 +524,7 @@ export class AttemptsService {
         earnedWeight: newEarnedWeight,
         leaderboardPoints: newPoints,
         durationMs: newDurationMs,
+        totalDurationMs: newDurationMs,
         finalScore: newScorePercent,
         scorePercent: newScorePercent,
         lastAnswerAt: serverReceivedAt,
@@ -563,6 +610,16 @@ export class AttemptsService {
       const attempt = attemptDoc.data() as AttemptDocument;
       this.verifyToken(attempt, token);
 
+      if (this.isAttemptExpired(attempt)) {
+        t.update(attemptRef, {
+          status: 'expired',
+          completionReason: 'expired',
+          completedAt: attempt.expiresAt || completedAt,
+          updatedAt: completedAt,
+        });
+        throw new BadRequestError('Attempt has expired', 'ATTEMPT_EXPIRED');
+      }
+
       if (attempt.status !== 'in_progress') {
         throw new BadRequestError('Attempt is not in progress', 'ATTEMPT_NOT_IN_PROGRESS');
       }
@@ -574,11 +631,13 @@ export class AttemptsService {
 
       const updatedData = {
         status: 'completed' as const,
+        completionReason: 'submitted' as const,
         completedAt,
         finalScore: outcome.finalScore,
         scorePercent: outcome.finalScore,
         leaderboardPoints: outcome.totalLeaderboardPoints,
         durationMs: outcome.totalDurationMs,
+        totalDurationMs: outcome.totalDurationMs,
         lastAnswerAt: completedAt,
         updatedAt: completedAt,
       };

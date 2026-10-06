@@ -43,8 +43,14 @@ export class PublicController {
         settings: {
           appearance: settings?.appearance,
           music: settings?.music,
+          timeLimitEnabled: !!settings?.timeLimitEnabled,
+          activityTimeLimitSeconds: settings?.activityTimeLimitSeconds ?? (settings?.timeLimitSeconds ?? null),
+          leaderboardEnabled: settings?.leaderboardEnabled !== false,
+          scoreVisible: settings?.scoreVisible !== false,
+          rankVisible: settings?.rankVisible !== false,
           hideLeaderboardFromParticipants: !!settings?.hideLeaderboardFromParticipants,
           maxAttempts: settings?.maxAttempts ?? 1,
+          finishGraceSeconds: settings?.finishGraceSeconds ?? 120,
         },
       };
 

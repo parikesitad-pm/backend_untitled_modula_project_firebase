@@ -12,6 +12,7 @@ import './docs/leaderboard.docs';
 import './docs/stats.docs';
 import './docs/assets.docs';
 import './docs/workspaces.docs';
+import './docs/live-sessions.docs';
 import './docs/system.docs';
 
 export function getOpenApiDocument() {
@@ -55,6 +56,7 @@ export function getOpenApiDocument() {
       { name: 'System', description: 'System health and diagnostic endpoints' },
       { name: 'Auth', description: 'Operator authentication and token issuance' },
       { name: 'Activities', description: 'Activity lifecycle, configuration, and scheduling' },
+      { name: 'LiveSessions', description: 'Realtime live play sessions, host lobby, and participant presence' },
       { name: 'Questions', description: 'Builder question and choice authoring' },
       { name: 'Participants', description: 'Participant intake and durable profiles' },
       { name: 'Attempts', description: 'Participant test execution and submission' },

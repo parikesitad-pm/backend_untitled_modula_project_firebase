@@ -14,6 +14,9 @@ import { assetsRoutes } from './modules/assets/assets.routes';
 import { storageRoutes } from './modules/storage/storage.routes';
 import { operatorsRoutes } from './modules/auth/operators.routes';
 import { workspacesRoutes } from './modules/workspaces/workspaces.routes';
+import { liveSessionsRoutes, publicLiveSessionsRoutes } from './modules/live-sessions/live-sessions.routes';
+import { assessmentsRoutes } from './modules/assessments/assessments.routes';
+import { publicAssessmentsRoutes } from './modules/assessments/public-assessments.routes';
 import { corsMiddleware } from './middleware/cors.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 
@@ -102,6 +105,10 @@ export function createApp(): Express {
   apiRouter.use('/storage', storageRoutes);
   apiRouter.use('/operators', operatorsRoutes);
   apiRouter.use('/workspaces', workspacesRoutes);
+  apiRouter.use('/live-sessions', liveSessionsRoutes);
+  apiRouter.use('/public/live-sessions', publicLiveSessionsRoutes);
+  apiRouter.use('/assessments', assessmentsRoutes);
+  apiRouter.use('/public/assessments', publicAssessmentsRoutes);
   apiRouter.use('/', statsRoutes);
 
   // Mount router under both /api and root for Cloud Function compatibility

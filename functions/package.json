@@ -23,6 +23,7 @@
     "test:coverage": "vitest run --coverage",
     "openapi:validate": "tsx scripts/validate-openapi.ts",
     "bootstrap:owner": "tsx scripts/bootstrap-owner.ts",
+    "seed:operators": "tsx scripts/create-operator.ts",
     "migrate:workspaces": "tsx scripts/migrate-workspaces.ts",
     "smoke:production": "tsx scripts/smoke-production.ts"
   },

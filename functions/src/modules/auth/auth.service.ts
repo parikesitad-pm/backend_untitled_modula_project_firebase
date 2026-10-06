@@ -16,10 +16,17 @@ export class AuthService {
     await rateLimiterService.checkRateLimit(userKey);
     await rateLimiterService.checkRateLimit(ipKey);
 
-    const snapshot = await this.operatorsCol
+    let snapshot = await this.operatorsCol
       .where('usernameNormalized', '==', normalized)
       .limit(1)
       .get();
+
+    if (snapshot.empty) {
+      snapshot = await this.operatorsCol
+        .where('email', '==', normalized)
+        .limit(1)
+        .get();
+    }
 
     if (snapshot.empty) {
       await performDummyVerification(input.accessCode);
