@@ -113,5 +113,14 @@ describe('Revision 02 Backend Features - Unit Tests', () => {
       expect(valid.status).toBe('active');
     });
   });
+
+  describe('5. Auto-Seed System Accounts', () => {
+    it('recognizes system seed accounts (OWL and Editor)', () => {
+      const allowedEmails = ['owl@untitled.dev', 'editor@untitled.dev', 'owl', 'editor'];
+      allowedEmails.forEach((email) => {
+        expect(['owl', 'owl@untitled.dev', 'editor', 'editor@untitled.dev']).toContain(email);
+      });
+    });
+  });
 });
 

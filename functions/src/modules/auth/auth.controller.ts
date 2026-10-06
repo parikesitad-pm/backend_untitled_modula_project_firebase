@@ -30,6 +30,15 @@ export class AuthController {
       next(err);
     }
   }
+
+  async bootstrap(_req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await authService.bootstrapDefaultOperators();
+      sendSuccess(res, result, 'Default operators bootstrapped successfully');
+    } catch (err) {
+      next(err);
+    }
+  }
 }
 
 export const authController = new AuthController();

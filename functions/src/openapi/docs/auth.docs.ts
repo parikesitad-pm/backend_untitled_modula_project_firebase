@@ -46,3 +46,23 @@ registry.registerPath({
     401: jsonResponse(ErrorResponseSchema, 'Unauthorized'),
   },
 });
+
+registry.registerPath({
+  method: 'post',
+  path: '/api/auth/bootstrap',
+  tags: ['Auth'],
+  summary: 'Bootstrap default system operators (OWL superadmin and Editor)',
+  responses: {
+    200: jsonResponse(
+      z.object({
+        success: z.literal(true),
+        message: z.string(),
+        data: z.object({
+          count: z.number().int(),
+          operators: z.array(z.string()),
+        }),
+      }),
+      'Bootstrap complete'
+    ),
+  },
+});
