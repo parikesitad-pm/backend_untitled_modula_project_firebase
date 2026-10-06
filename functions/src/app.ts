@@ -1,3 +1,5 @@
+import path from 'path';
+import fs from 'fs';
 import express, { Express } from 'express';
 import swaggerUi from 'swagger-ui-express';
 import { getOpenApiDocument } from './openapi/openapi';
@@ -14,6 +16,40 @@ import { operatorsRoutes } from './modules/auth/operators.routes';
 import { workspacesRoutes } from './modules/workspaces/workspaces.routes';
 import { corsMiddleware } from './middleware/cors.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
+
+const SWAGGER_CDN_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.18.2';
+const swaggerCdnMap: Record<string, string> = {
+  'swagger-ui.css': `${SWAGGER_CDN_BASE}/swagger-ui.min.css`,
+  'swagger-ui.css.map': `${SWAGGER_CDN_BASE}/swagger-ui.css.map`,
+  'swagger-ui-bundle.js': `${SWAGGER_CDN_BASE}/swagger-ui-bundle.min.js`,
+  'swagger-ui-bundle.js.map': `${SWAGGER_CDN_BASE}/swagger-ui-bundle.js.map`,
+  'swagger-ui-standalone-preset.js': `${SWAGGER_CDN_BASE}/swagger-ui-standalone-preset.min.js`,
+  'swagger-ui-standalone-preset.js.map': `${SWAGGER_CDN_BASE}/swagger-ui-standalone-preset.js.map`,
+  'favicon-32x32.png': `${SWAGGER_CDN_BASE}/favicon-32x32.png`,
+  'favicon-16x16.png': `${SWAGGER_CDN_BASE}/favicon-16x16.png`,
+};
+
+function handleSwaggerStaticAsset(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const filename = req.path.split('/').pop() || '';
+  if (swaggerCdnMap[filename]) {
+    try {
+      // In local dev/testing where node_modules/swagger-ui-dist is on disk, serve local file
+      const getDistPath = require('swagger-ui-dist/absolute-path');
+      const distDir = typeof getDistPath === 'function' ? getDistPath() : '';
+      if (distDir) {
+        const localFile = path.join(distDir, filename);
+        if (fs.existsSync(localFile)) {
+          return res.sendFile(localFile);
+        }
+      }
+    } catch {
+      // ignore
+    }
+    // In serverless environments (Vercel) without unpacked static assets, redirect directly to CDN
+    return res.redirect(302, swaggerCdnMap[filename]);
+  }
+  next();
+}
 
 export function createApp(): Express {
   const app = express();
@@ -47,6 +83,9 @@ export function createApp(): Express {
     }
     next();
   });
+
+  // Intercept Swagger UI static asset requests (serve local file or CDN fallback)
+  app.use(['/api/docs', '/docs'], handleSwaggerStaticAsset);
 
   app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openApiDoc));
   app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiDoc));
